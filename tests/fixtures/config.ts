@@ -15,6 +15,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     rpcCaptureMaxBytes: 1_048_576,
     rpcLimitBytes: 10_000_000,
     improveModelsFormatting: true,
+    claudeVisualize: true,
     ...overrides,
   };
 }

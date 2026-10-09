@@ -80,8 +80,10 @@ export class Gateway {
     // The socket opens before the first scan: a client connects at once and its requests wait for it.
     this.ready = this.claude.start().catch((error: unknown) => this.logger.error("claude.start.failed", { error: String(error) }));
     // Desktop's first skills/list (no cwds: stock's own) finds Claude's skills ready.
-    void this.stock.request("skills/list", {})
-      .then((stock: JsonObject) => this.claude.skills(stock.data.map((entry: JsonObject) => entry.cwd)), () => undefined);
+    void this.stock.request("skills/list", {}).then((stock: JsonObject) => {
+      this.claude.stockSkills(stock);
+      return this.claude.skills(stock.data.map((entry: JsonObject) => entry.cwd));
+    }, () => undefined);
     this.registerHandlers();
     await this.remote.start();
   }
@@ -312,6 +314,7 @@ export class Gateway {
     // cwds (what Desktop mostly sends) stock answers for its own cwd, and so do Claude's.
     on("skills/list", async (connection, params) => {
       const stock = await connection.upstream.request("skills/list", params);
+      this.claude.stockSkills(stock);
       const claude = await this.claude.skills(stock.data.map((entry: JsonObject) => entry.cwd)).catch(() => new Map<string, unknown[]>());
       const status = await this.statusSkill;
       return {

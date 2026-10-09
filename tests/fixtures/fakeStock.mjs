@@ -2,8 +2,9 @@
 // Minimal scripted `codex app-server --listen unix://…`: in-memory threads, the notifications stock sends, and a
 // few test hooks. Enough to exercise CCodex's gateway as a black box.
 import { randomUUID } from "node:crypto";
-import { renameSync } from "node:fs";
+import { existsSync, renameSync } from "node:fs";
 import { createServer } from "node:http";
+import { join } from "node:path";
 import { WebSocketServer } from "ws";
 
 const listen = process.argv[process.argv.indexOf("--listen") + 1];
@@ -212,8 +213,12 @@ const handlers = {
     return {};
   },
   "model/list": () => ({ data: [{ id: "gpt-6-luna", model: "gpt-6-luna", displayName: "GPT-6 Luna", isDefault: true }], nextCursor: null }),
-  // Like stock: without cwds, the skills of its own cwd.
-  "skills/list": (_connection, params) => ({ data: (params.cwds?.length ? params.cwds : ["/home/fake"]).map((cwd) => ({ cwd, skills: [{ name: "stock-skill" }], errors: [] })) }),
+  // Like stock: without cwds, the skills of its own cwd; Codex's bundled visualize skill while its plugin is there.
+  "skills/list": (_connection, params) => {
+    const visualize = join(process.env.CODEX_HOME ?? "/nonexistent", "plugins/cache/openai-bundled/visualize/1.0.0/skills/visualize/SKILL.md");
+    const skills = [{ name: "stock-skill" }, ...existsSync(visualize) ? [{ name: "visualize:visualize", path: visualize, enabled: true }] : []];
+    return { data: (params.cwds?.length ? params.cwds : ["/home/fake"]).map((cwd) => ({ cwd, skills, errors: [] })) };
+  },
   "account/rateLimits/read": () => ({ rateLimits: { limitId: "codex", primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: null }, secondary: null }, rateLimitsByLimitId: null }),
   "config/batchWrite": (_connection, params) => {
     for (const edit of params.edits) config[edit.keyPath] = edit.value;

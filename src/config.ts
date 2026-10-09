@@ -26,6 +26,8 @@ export interface Config {
   readonly delegateCodex: string;
   /** Our formulas and plots instructions for Codex and Claude models in the app. */
   readonly improveModelsFormatting: boolean;
+  /** Codex's bundled visualize skill (while enabled in Codex) in Claude chats too (`claude_visualize`). */
+  readonly claudeVisualize: boolean;
 }
 
 export const DEFAULT_RENAME_PROMPT = `Create a concise, vivid, memorable title for the task.
@@ -150,5 +152,6 @@ export function loadConfig(): Config {
     ...(file.title_model ? { titleModel: file.title_model as string } : {}),
     delegateCodex: expandHome(process.env.CCODEX_DELEGATE_CODEX ?? file.delegate_codex ?? codex),
     improveModelsFormatting: file.improve_models_formatting_for_codex_app ?? true,
+    claudeVisualize: file.claude_visualize ?? true,
   };
 }

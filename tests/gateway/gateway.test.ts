@@ -822,6 +822,49 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(fakeClaude.options.at(-1)!.systemPrompt.append).not.toContain("### Formulas");
   });
 
+  it("gives Claude chats Codex's visualize skill while stock lists it, with the chat's visuals folder, unless claude_visualize is off", async () => {
+    const plugins = join(process.env.CODEX_HOME!, "plugins");
+    const stockSkill = join(plugins, "cache", "openai-bundled", "visualize", "1.0.0", "skills", "visualize");
+    const install = () => {
+      mkdirSync(join(stockSkill, "scripts"), { recursive: true });
+      writeFileSync(join(stockSkill, "scripts", "render.py"), "print()\n");
+      writeFileSync(join(stockSkill, "SKILL.md"), "---\nname: visualize\n---\n\n\u{E200}visualize\u{E202}{\"path\":\"<absolute-path>/<title>.html\",\"mode\":\"wide\",\"title\":\"T\"}\u{E201}\n");
+    };
+    const options = async () => {
+      await client.request("skills/list", {});
+      const threadId = await claudeThread();
+      await client.turn(threadId, "start");
+      return { threadId, options: fakeClaude.options.at(-1)! };
+    };
+    install();
+    try {
+      const { threadId, options: claude } = await options();
+      const plugin = join(gateway.config.dataDir, "virtual", "visualize");
+      const day = new Date(Number.parseInt(threadId.replaceAll("-", "").slice(0, 12), 16)).toISOString().slice(0, 10).split("-");
+      const folder = join(process.env.CODEX_HOME!, "visualizations", ...day, threadId);
+      expect(claude).toMatchObject({ plugins: [{ type: "local", path: plugin }], additionalDirectories: [folder] });
+      expect(existsSync(folder)).toBe(true);
+      // Claude writes Desktop's directive (it cannot write the reference line); the skill's files are where it says.
+      expect(readFileSync(join(plugin, "skills", "visualize", "SKILL.md"), "utf8")).toContain('\n::codex-inline-vis{path="<absolute-path>/<title>.html" title="T" mode="wide"}\n');
+      expect(readFileSync(join(plugin, "skills", "visualize", "scripts", "render.py"), "utf8")).toBe("print()\n");
+      // Desktop lists stock's skill only.
+      expect((await client.request("skills/list", {})).data[0].skills.map((skill: any) => skill.name)).toEqual(["ccodex:status", "stock-skill", "visualize:visualize", "claude:review-pr"]);
+
+      // Turned off in Codex: stock no longer lists it.
+      rmSync(plugins, { recursive: true });
+      expect((await options()).options).not.toHaveProperty("plugins");
+
+      install();
+      await gateway.stop();
+      gateway = await startTestGateway({ claudeVisualize: false });
+      client = await gateway.connect();
+      expect((await options()).options).not.toHaveProperty("plugins");
+      expect(fakeClaude.options.at(-1)).not.toHaveProperty("additionalDirectories");
+    } finally {
+      rmSync(plugins, { recursive: true, force: true });
+    }
+  });
+
   it("carries a chat's goal to the model it switches to, active or paused, and stops the Claude session it leaves", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "start");

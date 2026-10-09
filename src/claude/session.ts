@@ -23,6 +23,7 @@ import { foreignOwner, peerKey, peerMessageItem, peerOrigin, sentMessageItem, su
 import { baseOptions, claudeMode } from "./sdk.js";
 import { endedBackground, killedCommand, proposedChanges, startTool, stoppedCommand, updateToolInput, type ActiveTool, type BackgroundEnd } from "./toolMapper.js";
 import type { ClaudeThreads } from "./threads.js";
+import { visualizeOptions } from "./visualize.js";
 
 export interface SessionSettings {
   cwd: string;
@@ -286,7 +287,7 @@ export class ClaudeSession {
   private warm?: WarmProcess;
 
   private optionsKey(): string {
-    return JSON.stringify([this.settings, this.exists, this.resumeAt ?? null]);
+    return JSON.stringify([this.settings, this.exists, this.resumeAt ?? null, this.host.visualizePlugin ?? null]);
   }
 
   /** Starts Claude's process before the first prompt, so that prompt does not wait for it; unused, it goes. */
@@ -328,6 +329,7 @@ export class ClaudeSession {
     const effort = claudeEffort(this.host.effort(settings));
     return {
       ...baseOptions(this.host.config),
+      ...visualizeOptions(this.host.visualizePlugin, this.threadId),
       cwd: settings.cwd,
       ...(settings.model ? { model: settings.model } : {}),
       ...(effort ? { effort: effort as never } : {}),

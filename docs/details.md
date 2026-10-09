@@ -102,6 +102,8 @@ Claude's 30-day cleanup deleted come back as text. The 0.4 databases move to
   Claude's; Claude also gets
   [`instructions/ccodex_extra_claude_instructions.md`](../instructions/ccodex_extra_claude_instructions.md)
   (what the App shows beyond a terminal).
+- `claude_visualize` (default `true`) — Claude chats get Codex's bundled Visualize skill (while it is on in Codex) and
+  draw interactive visuals in the chat as GPT chats do; `false` leaves Claude's context as it is.
 - `rpc_limit_mb` (default `10`) — the most CCodex sends the App in one message or as one command's output (how the
   App shows a remote host's image or video): a bigger answer fails, a bigger notification is dropped, the output stops
   there. One huge message holds up every chat over SSH and can drop the phone's connection. `0` turns it off.

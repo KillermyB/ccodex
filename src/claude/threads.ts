@@ -23,6 +23,7 @@ import { preview, summarizeTranscript, userText, type TranscriptHeader } from ".
 import { claudeMode, codexPermissions, mapClaudeModel, mapSkill, permissionSettings, withProbeQuery } from "./sdk.js";
 import { killProcesses, sessionProcesses, type SessionProcess } from "./processes.js";
 import { ClaudeSession, type SessionSettings } from "./session.js";
+import { stockVisualizeSkill, writeVisualizePlugin } from "./visualize.js";
 import type { Meta } from "../meta.js";
 
 interface SideThread {
@@ -843,6 +844,26 @@ export class ClaudeThreads {
   private readonly pickerValues = new Map<string, string>();
   private readonly defaultEfforts = new Map<string, string>();
   private readonly skillCache = new Map<string, { at: number; skills: Promise<JsonObject[]> }>();
+  /** Codex's visualize skill as Claude's plugin (`claude_visualize`), from the SKILL.md stock lists. */
+  private visualize?: { readonly skillFile: string; readonly plugin: string };
+
+  public get visualizePlugin(): string | undefined { return this.visualize?.plugin; }
+
+  /** Stock's skill list tells whether its visualize skill is on, and where it is (a Codex upgrade moves it). */
+  public stockSkills(stock: JsonObject): void {
+    if (!this.config.claudeVisualize) return;
+    const skillFile = stockVisualizeSkill(stock);
+    if (skillFile === this.visualize?.skillFile) return;
+    this.visualize = undefined;
+    if (!skillFile) return;
+    const plugin = join(this.config.dataDir, "virtual", "visualize");
+    try {
+      writeVisualizePlugin(plugin, skillFile);
+      this.visualize = { skillFile, plugin };
+    } catch (error) {
+      this.logger.warn("claude.visualize.unavailable", { skillFile, error: String(error) });
+    }
+  }
 
   public async skills(cwds: readonly string[]): Promise<Map<string, JsonObject[]>> {
     const entries = await Promise.all(cwds.map(async (cwd) => {
