@@ -9,7 +9,9 @@ import { claudeSkillFile } from "./toolMapper.js";
 import { ULTRA } from "./delegation.js";
 
 export function claudeEnvironment(): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = { ...process.env, CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1" };
+  // Claude chats are a desktop app's, like Claude Desktop's: background commands run with no time limit (Claude Code
+  // stops them after 30 min to 2 h in Agent SDK sessions, which it takes for unattended).
+  const env: Record<string, string | undefined> = { ...process.env, CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1", CLAUDE_CODE_ENTRYPOINT: "claude-desktop" };
   delete env.CCODEX_SHIM_ACTIVE;
   delete env.CODEX_CLI_PATH;
   return env;

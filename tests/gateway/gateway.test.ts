@@ -422,6 +422,14 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(summaries(thread.turns[0].items)).toEqual(["pondering the answer"]);
   });
 
+  it("keeps the frames of a forked skill typed as the prompt out of the chat", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "fork skill: review");
+    const texts = client.notifications("item/completed", threadId).map((message) => message.params.item)
+      .filter((item) => item.type === "agentMessage").map((item) => item.text);
+    expect(texts).toEqual([fakeClaude.reply("fork skill: review")]);
+  });
+
   it("shows what Claude tells the user between tool calls as its message, though it comes as thinking, live and in history", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "narrate: Checking the files.");

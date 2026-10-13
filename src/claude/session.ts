@@ -709,10 +709,8 @@ export class ClaudeSession {
   private handle(message: SDKMessage): void {
     const m = message as any;
     this.activeAt = Date.now();
-    if (m.parent_tool_use_id) {
-      this.host.subagentMessage(this, m);
-      return;
-    }
+    // A sub-agent's frames (a forked skill's too): the parent's item shows its activity; its history is read from disk.
+    if (m.parent_tool_use_id) return;
     // Claude's own word on `/goal` ("Goal set: …"), streamed as a reply: Codex clients show goals themselves.
     if (m.local_command_run?.command === "goal") return;
     if (this.afterResult && (m.type === "stream_event" || m.type === "assistant")) this.continued();

@@ -1131,15 +1131,15 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:zvariant | 4.2.0 | MIT |
 | cargo:zvariant_derive | 4.2.0 | MIT |
 | cargo:zvariant_utils | 2.1.0 | MIT |
-| npm:@anthropic-ai/claude-agent-sdk | 0.3.284 | SEE LICENSE IN README.md |
-| npm:@anthropic-ai/claude-agent-sdk-darwin-arm64 | 0.3.284 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-darwin-x64 | 0.3.284 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-linux-arm64 | 0.3.284 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-linux-arm64-musl | 0.3.284 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-linux-x64 | 0.3.284 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-linux-x64-musl | 0.3.284 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-win32-arm64 | 0.3.284 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-win32-x64 | 0.3.284 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk | 0.3.296 | SEE LICENSE IN README.md |
+| npm:@anthropic-ai/claude-agent-sdk-darwin-arm64 | 0.3.296 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-darwin-x64 | 0.3.296 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-linux-arm64 | 0.3.296 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-linux-arm64-musl | 0.3.296 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-linux-x64 | 0.3.296 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-linux-x64-musl | 0.3.296 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-win32-arm64 | 0.3.296 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-win32-x64 | 0.3.296 | SEE LICENSE IN LICENSE.md |
 | npm:@anthropic-ai/sdk | 0.111.0 | MIT |
 | npm:@babel/runtime | 7.29.7 | MIT |
 | npm:@esbuild/aix-ppc64 | 0.25.12 | MIT |
@@ -1170,7 +1170,7 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | npm:@esbuild/win32-x64 | 0.25.12 | MIT |
 | npm:@hono/node-server | 1.19.17 | MIT |
 | npm:@jridgewell/sourcemap-codec | 1.6.0 | MIT |
-| npm:@modelcontextprotocol/sdk | 1.29.0 | MIT |
+| npm:@modelcontextprotocol/sdk | 1.32.1 | MIT |
 | npm:@openai/codex | 0.156.0 | Apache-2.0 |
 | npm:@openai/codex-darwin-arm64 | 0.156.0-darwin-arm64 | Apache-2.0 |
 | npm:@openai/codex-darwin-x64 | 0.156.0-darwin-x64 | Apache-2.0 |
@@ -1305,7 +1305,7 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | npm:picomatch | 4.0.7 | MIT |
 | npm:pkce-challenge | 5.0.1 | MIT |
 | npm:postcss | 8.5.28 | MIT |
-| npm:proxy-addr | 2.0.7 | MIT |
+| npm:proxy-addr | 2.0.8 | MIT |
 | npm:qs | 6.16.0 | BSD-3-Clause |
 | npm:range-parser | 1.3.0 | MIT |
 | npm:raw-body | 3.0.2 | MIT |

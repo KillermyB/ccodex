@@ -221,7 +221,7 @@ export function startTool(
       type: "collabAgentToolCall", id: state.itemId, tool: sendInput ? "sendInput" : "spawnAgent", status: "inProgress",
       senderThreadId: threadId, receiverThreadIds: [],
       prompt: text(input.message) || text(input.content) || text(input.prompt) || text(input.description) || null,
-      model: text(input.model) || null, reasoningEffort: null, agentsStates: {},
+      model: text(input.model) || null, reasoningEffort: text(input.effort) || null, agentsStates: {},
     } };
   }
   return { state, item: {

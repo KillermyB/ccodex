@@ -500,6 +500,8 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     await new Promise((resolve) => setTimeout(resolve, 2000));
     yield base(sessionId, { type: "system", subtype: "task_notification", task_id: agentId, tool_use_id: toolUseId, status: "completed", output_file: "", summary: "Echo" });
   }
+  // Like the CLI since 2.1.287: the frames of a forked skill typed as the prompt stream too.
+  if (text.startsWith("fork skill:")) yield base(sessionId, { type: "assistant", parent_tool_use_id: "forked-command-review", agent_id: "fork1", message: { id: "msg_fork", role: "assistant", model, content: [{ type: "text", text: "FORK-INSIDE" }], stop_reason: null, usage: { input_tokens: 1, output_tokens: 1 } } });
   const messageId = `msg_${randomUUID().slice(0, 8)}`;
   yield base(sessionId, { type: "stream_event", event: { type: "message_start", message: { id: messageId } } });
   // Like the CLI: Claude 5 thinking comes back empty unless the session asks for summarized thinking.

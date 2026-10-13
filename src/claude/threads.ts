@@ -680,10 +680,6 @@ export class ClaudeThreads {
     };
   }
 
-  public subagentMessage(_session: ClaudeSession, _message: JsonObject): void {
-    // Sub-agent activity is shown by the parent's collabAgentToolCall item; child history is read from disk.
-  }
-
   public onRateLimit(info: JsonObject | undefined): void {
     if (!info) return;
     // A turn's event carries every plan window Claude knows in `unifiedWindows` (utilization as a fraction); `status`,

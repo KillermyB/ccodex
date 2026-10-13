@@ -160,8 +160,9 @@ describe("Claude tool projection", () => {
   it("uses the provider-resolved final model for completed subagents", () => {
     const { state, item } = startTool(0, {
       type: "tool_use", id: "agent", name: "Agent",
-      input: { prompt: "inspect", model: "sonnet" },
+      input: { prompt: "inspect", model: "sonnet", effort: "low" },
     }, "/tmp/project", "thread-1");
+    expect(item).toMatchObject({ type: "collabAgentToolCall", tool: "spawnAgent", reasoningEffort: "low" });
     expect(completeTool(item, "done", false, {
       resolvedModel: "claude-opus-4-8",
       modelsUsed: ["claude-sonnet-5", "claude-opus-4-8"],
