@@ -86,11 +86,12 @@ export class Titles {
     return { turn: startedTurn(turn) };
   }
 
-  /** Desktop's provisional name is a prefix of the first prompt; manual renames pass through (and win). */
+  /** Desktop's provisional name is the start of the typed text, which Desktop may put after its own header
+   * (pasted files) in the first prompt; manual renames pass through (and win). */
   public async nameSet(connection: Connection, params: JsonObject): Promise<unknown> {
     const name = collapse(String(params.name ?? "")).replace(/…$/u, "").trim();
     const prompt = this.prompts.get(params.threadId);
-    if (prompt && name && prompt.startsWith(name)) return {};
+    if (prompt && name && prompt.includes(name)) return {};
     // A name the user gives wins over the title still being written.
     this.generating.delete(params.threadId);
     return this.gateway.threadRequest(connection, "thread/name/set", params);

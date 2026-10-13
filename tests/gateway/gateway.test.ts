@@ -1744,6 +1744,13 @@ describe("titles (rename_prompt)", () => {
     for (const threadId of threads) expect((await client.request("thread/read", { threadId })).thread.name).toBe("Mine");
   });
 
+  it("ignores Desktop's provisional name when Desktop puts pasted files before the typed text", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "\n# Files pasted by the user:\n\n## \"notes\": /tmp/Pasted text.txt\n\n## My request:\na slow title for the pasted notes");
+    expect(await client.request("thread/name/set", { threadId, name: "a slow title for the…" })).toEqual({});
+    await client.waitFor("thread/name/updated", (params) => params.threadId === threadId && params.threadName === "🦊 Fox Title ✳️");
+  });
+
   it("keeps Claude's own title of a session unseen while CCodex names it", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "a slow title");
