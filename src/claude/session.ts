@@ -893,8 +893,9 @@ export class ClaudeSession {
         this.endBackground(m.task_id, { status: String(m.status), summary: String(m.summary ?? ""), ...(m.output_file ? { outputFile: m.output_file } : {}), atMs: Date.now() });
         return;
       case "background_tasks_changed": {
+        // It lists background tasks only: a command the turn waits on ends with its own notification.
         const live = new Set((m.tasks ?? []).map((task: any) => task.task_id));
-        for (const id of [...this.tasks.keys()].filter((id) => !live.has(id))) this.tasks.delete(id);
+        for (const task of this.backgroundTasks) if (!live.has(task.taskId)) this.tasks.delete(task.taskId);
         return;
       }
       case "api_retry":

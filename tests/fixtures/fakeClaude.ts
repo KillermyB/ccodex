@@ -330,6 +330,8 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     transcript.write(call);
     yield base(sessionId, call);
     yield base(sessionId, { type: "system", subtype: "task_started", task_id: "fg1", tool_use_id: toolUseId, description: waited[1], task_type: "local_bash", is_backgrounded: false });
+    // A background task ending meanwhile: Claude Code lists the background tasks only, never the command it waits on.
+    yield base(sessionId, { type: "system", subtype: "background_tasks_changed", tasks: [] });
     const file = join(tmpdir(), `claude-${process.getuid!()}`, (options.cwd ?? process.cwd()).replace(/[^a-zA-Z0-9]/gu, "-"), sessionId, "tasks", "fg1.output");
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, "tick 1\ntick 2\n");
