@@ -84,7 +84,7 @@ const subpath = (path: string) => `(subpath ${quote(canonical(path))})`;
 /** Outer boundary for the native Claude process, including its direct file tools. */
 export function seatbeltProfile(readRoots: readonly string[], writeRoots: readonly string[], protectedRoots: readonly string[], _secretRoots: readonly string[] = [], network = true, keychain = true, authenticationFiles: readonly string[] = []): string {
   // Character classes avoid ambiguity in SBPL regex escaping. Applied to all aliases of a path.
-  const secretRules = `(deny file-read* file-write* (regex #"/([.]git|[.]claude|[.]codex|[.]ccodex|credentials([.]json)?|[.]ssh|[.]aws|[.]azure|[.]gnupg|[.]npmrc|[.]netrc|[.]env([.][^/]*)?|[^/]+[.](pem|key|p12|pfx))(/|$)"))`;
+  const secretRules = `(deny file-read* file-write* (require-all (regex #"/([.]git|[.]claude|[.]codex|[.]ccodex|credentials([.]json)?|[.]ssh|[.]aws|[.]azure|[.]gnupg|[.]npmrc|[.]netrc|[.]env([.][^/]*)?|[^/]+[.](pem|key|p12|pfx))(/|$)") (require-not (require-any (literal "/private/etc/ssl/cert.pem") (literal "/etc/ssl/cert.pem")))))`;
   return `(version 1)
 (deny default)
 (allow process-fork process-exec sysctl-read mach-lookup ipc-posix-shm)
@@ -96,7 +96,8 @@ ${keychain ? "(allow process-info*)" : ""}
 (allow file-read* ${["/System", "/usr", "/bin", "/sbin", "/Library", "/opt/homebrew", "/usr/local", "/private/etc", "/private/var/db/timezone", "/dev", ...readRoots].map(subpath).join(" ")})
 (allow file-write* (literal "/dev/null") (literal "/dev/tty") ${writeRoots.map(subpath).join(" ")})
 ${protectedRoots.length ? `(deny file-write* ${protectedRoots.map(subpath).join(" ")})` : ""}
-${network ? `(allow network-outbound (remote tcp "*:443"))` : `(deny network*)`}
+${network ? `(allow file-read-data (literal "/private/var/run/resolv.conf"))
+(allow network-outbound (literal "/private/var/run/mDNSResponder") (remote tcp "*:443"))` : `(deny network*)`}
 ${keychain ? authenticationFiles.length ? `(allow file-read-data ${authenticationFiles.map((path) => `(literal ${quote(canonical(path))})`).join(" ")})` : "" : "(deny mach-lookup)"}
 ${secretRules}
 ${_secretRoots.map((root) => `(deny file-read* file-write* (require-all ${subpath(root)} (regex #"/[.]ccodex-secure(/|$)")))`).join("\n")}

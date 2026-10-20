@@ -7,7 +7,7 @@ on run
     return
   end try
   set commandBase to "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin " & quoted form of nodePath & " " & quoted form of (runtimeFolder & "/dist/cli/main.js")
-  set actionChoice to choose from list {"Vérifier", "Vérifier la connexion", "Installer", "Connecter Claude", "Désinstaller", "Lire les limites"} with title "CCodex Secure" with prompt "Version locale expérimentale. Choisis d’abord Vérifier. Les commandes de l’IA restent sans réseau." default items {"Vérifier"} OK button name "Continuer" cancel button name "Fermer"
+  set actionChoice to choose from list {"Vérifier", "Vérifier la connexion", "Vérifier le réseau", "Installer", "Connecter Claude", "Désinstaller", "Lire les limites"} with title "CCodex Secure" with prompt "Version locale expérimentale. Choisis d’abord Vérifier. Les commandes de l’IA restent sans réseau." default items {"Vérifier"} OK button name "Continuer" cancel button name "Fermer"
   if actionChoice is false then return
   set chosenAction to item 1 of actionChoice
   try
@@ -17,6 +17,9 @@ on run
     else if chosenAction is "Vérifier la connexion" then
       do shell script (commandBase & " secure-auth-check")
       display dialog "La connexion Claude est reconnue sous les protections macOS. Aucun message n’a été envoyé à un modèle." buttons {"Fermer"} with title "CCodex Secure"
+    else if chosenAction is "Vérifier le réseau" then
+      do shell script (commandBase & " secure-network-check")
+      display dialog "La résolution DNS et HTTPS vers l’API officielle Anthropic fonctionnent sous les protections macOS. Aucun identifiant ni message IA n’a été envoyé." buttons {"Fermer"} with title "CCodex Secure"
     else if chosenAction is "Installer" then
       display dialog "Ferme tes conversations actives et quitte Codex avant de continuer.\n\nL’activation ajoute un lanceur local et une configuration de démarrage réversible. L’application Codex signée reste intacte. Aucune connexion à tes comptes n’est effectuée.\n\nLes commandes IA ne pourront pas télécharger de dépendances ni démarrer une prévisualisation réseau." buttons {"Annuler", "Installer"} default button "Installer" cancel button "Annuler" with title "Activer CCodex Secure"
       do shell script (commandBase & " setup")

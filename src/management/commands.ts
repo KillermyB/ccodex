@@ -1,3 +1,4 @@
+import { verifyNetwork } from "../security/network.js";
 import { assertAuthenticated } from "../security/authentication.js";
 import { verifyBundle } from "../security/bundle.js";
 import { pinEngine, verifyEngine } from "../security/engine.js";
@@ -316,6 +317,7 @@ export async function doctor(config: Config, json: boolean): Promise<number> {
 
 export async function runManagementCommand(args: readonly string[], config: () => Config): Promise<number | undefined> {
   switch (args[0]) {
+    case "secure-network-check": { const status = await verifyNetwork(config()); process.stdout.write(`DNS et HTTPS disponibles pour api.anthropic.com (HTTP ${status}). Aucun compte utilisé.\n`); return 0; }
     case "secure-auth-check": await assertAuthenticated(config()); process.stdout.write("Connexion Claude reconnue sous les protections macOS.\n"); return 0;
     case "secure-check": process.stdout.write(`${await selfCheck(config())}\n`); return 0;
     case "setup": return setup(args.slice(1));

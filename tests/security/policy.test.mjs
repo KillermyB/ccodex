@@ -89,3 +89,12 @@ test('an engine replacement is rejected after pinning',()=>{
  const fake=join(base,'fake-engine');writeFileSync(fake,'original');const pinned={productHome:join(base,'pin'),claudeBinary:fake};
  assert.throws(()=>verifyEngine(pinned),/not been pinned/);pinEngine(pinned);verifyEngine(pinned);writeFileSync(fake,'replaced-content');assert.throws(()=>verifyEngine(pinned),/changed after installation/);
 });
+
+test('DNS exception targets only the macOS resolver and public CA remains readable while private PEM is blocked',{skip:process.platform!=='darwin'},()=>{
+ const engine=seatbeltProfile([project],[],[],[project],true,true);const shell=seatbeltProfile([project],[],[],[project],false,false);
+ assert.match(engine,/\(literal "\/private\/var\/run\/mDNSResponder"\)/);assert.doesNotMatch(shell,/mDNSResponder/);assert.match(shell,/\(deny network\*\)/);assert.doesNotMatch(engine,/remote udp/);
+ writeFileSync(join(project,'private.pem'),'synthetic-private-pem');
+ const run=path=>spawnSync('/usr/bin/sandbox-exec',['-p',engine,'/bin/cat',path],{encoding:'utf8',env:{PATH:'/usr/bin:/bin'}});
+ const ca=run('/etc/ssl/cert.pem');assert.equal(ca.status,0,ca.stderr);assert.match(ca.stdout,/BEGIN CERTIFICATE/);
+ const denied=run(join(project,'private.pem'));assert.notEqual(denied.status,0);assert.doesNotMatch(denied.stdout,/synthetic-private-pem/);
+});
