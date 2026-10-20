@@ -1,14 +1,14 @@
 {
   "name": "@gkorepanov/ccodex",
   "version": "0.6.0-personal.1",
-  "description": "Local hardened macOS fork of ccodex; no remote relay or automatic provider delegation.",
-  "homepage": "https://github.com/gkorepanov/ccodex#readme",
+  "description": "Unofficial macOS fork of ccodex with personal/project modes, native Claude tools and inline animation previews.",
+  "homepage": "https://github.com/KillermyB/ccodex#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gkorepanov/ccodex.git"
+    "url": "git+https://github.com/KillermyB/ccodex.git"
   },
   "bugs": {
-    "url": "https://github.com/gkorepanov/ccodex/issues"
+    "url": "https://github.com/KillermyB/ccodex/issues"
   },
   "private": true,
   "license": "MIT",

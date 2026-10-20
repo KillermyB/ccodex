@@ -1,6 +1,37 @@
 # CCodex Personnel pour macOS
 
-Version locale 0.6.0-personal.1, dérivée de gkorepanov/ccodex (base 479aa13d66c9b54685348d0f7b9bdc1c7445a7bf) puis des corrections locales secure.1 à secure.3. Projet indépendant, sans affiliation ni validation OpenAI ou Anthropic. Licence MIT conservée.
+**Mon fork de [gkorepanov/ccodex](https://github.com/gkorepanov/ccodex), adapté à mon usage sur Mac : Claude dans l’interface Codex, accès entre projets et aperçus interactifs.**
+
+Le projet original a été créé par **George Korepanov**. Ce fork est maintenu sur [KillermyB/ccodex](https://github.com/KillermyB/ccodex) et conserve son historique et sa licence MIT. Merci à l’auteur pour la passerelle qui permet d’utiliser les modèles Claude dans Codex.
+
+## Pourquoi j’ai forké le projet
+
+J’aime l’interface de Codex et je voulais pouvoir y utiliser Claude sans changer d’application, notamment pour du motion design. J’ai donc adapté ccodex à mon utilisation personnelle : une installation macOS réversible, des contrôles sur le moteur exécuté, un accès aux documents entre projets et un outil pour afficher des tests d’animations dans la conversation.
+
+Le travail a commencé par une version très isolée, puis j’ai ajouté un mode Mac personnel pour retrouver les outils natifs de Claude Code et travailler plus librement. Les deux modes restent disponibles. Ce sont des choix pour mon usage, pas une certification de sécurité du projet d’origine ou de ce fork.
+
+## Ce que j’ai modifié
+
+| Domaine | Modifications dans ce fork |
+|---|---|
+| Installation macOS | Application de contrôle, activation locale, désinstallation et retour arrière ; l’application Codex signée reste intacte. [Installation](src/management/commands.ts), [interface](scripts/control.applescript). |
+| Moteur Claude | Utilisation du binaire officiel installé séparément ; version validée 2.1.304 et empreinte SHA-256 enregistrée localement pour détecter un changement. [Contrôle du moteur](src/security/engine.ts). |
+| Connexion et réseau | Connexion Claude dédiée, vérification du statut sans appel de modèle, corrections de l’accès au trousseau en mode isolé et du DNS/TLS macOS. [Authentification](src/security/authentication.ts), [trousseau](src/security/keychain.ts), [réseau](src/security/network.ts). |
+| Modes d’accès | Mode personnel avec fichiers entre projets, Bash, Git et réseau ; mode projet isolé conservé. Les autorisations Standard, Accès complet et Lecture seule/Plan sont prises en compte. [Politique](src/security/policy.ts), [permissions](src/claude/sdk.ts). |
+| Animations et interfaces | Outil `mcp__artifacts__publish_html` pour publier de petits aperçus HTML/CSS/JavaScript dans Codex ; serveurs locaux possibles pour les applications complètes. [Aperçus](src/claude/artifacts.ts). |
+| Périmètre des fonctions | Relais natif tiers et contrôle distant retirés de ce fork ; transferts automatiques vers GPT, captures RPC et mises à jour du registre désactivés. Aucun hook, plugin ou MCP externe chargé automatiquement. |
+| Validation | 30 tests dédiés, avec fichiers et moteurs factices, plus des contrôles séparés d’installation et d’initialisation du moteur officiel. [Tests](tests/security), [CI macOS](.github/workflows/ci.yml). |
+
+## Version et provenance
+
+Version **0.6.0-personal.1**, basée sur le commit amont [`479aa13`](https://github.com/gkorepanov/ccodex/commit/479aa13d66c9b54685348d0f7b9bdc1c7445a7bf).
+
+- [`9819109`](https://github.com/KillermyB/ccodex/commit/98191098f4f8ae50f53c04fde42189a8e38f2cd8) : première version locale avec isolation et retrait du relais distant.
+- [`6042e32`](https://github.com/KillermyB/ccodex/commit/6042e3210188fa4c62e629187e3624a69d818375) : correction de la reconnaissance de la connexion macOS.
+- [`0f77cee`](https://github.com/KillermyB/ccodex/commit/0f77ceef7fab8f1dad0b48b7089643f73b19ff08) : correction DNS et accès au certificat public système.
+- [`c3f9c13`](https://github.com/KillermyB/ccodex/commit/c3f9c13715b9bdac92d210b054e867a8268f76f2) : mode Mac personnel et aperçus interactifs.
+
+Projet indépendant, sans affiliation ni validation OpenAI ou Anthropic. La présence d’un nom ou d’un compte d’IA dans l’historique des contributions ne constitue pas une validation par son fournisseur.
 
 ## Mode Mac personnel
 
@@ -30,7 +61,13 @@ Le mode projet isolé reste disponible : il conserve les restrictions des versio
 
 Le contrôle distant, le relais natif tiers, les transferts automatiques vers GPT, les captures RPC et les mises à jour du registre restent désactivés. Aucun hook, MCP ou plugin externe n'est chargé automatiquement. L'application est signée localement, sans notarisation Apple.
 
+## Distribution de ce fork
+
+Ce dépôt publie les sources modifiées et leur historique. Le paquet applicatif macOS a été construit et vérifié localement ; cette publication ne fournit pas encore un installateur téléchargeable depuis GitHub. Le nom technique `@gkorepanov/ccodex` est conservé dans le code pour la compatibilité des chemins d’installation ; `private: true` interdit sa publication npm depuis ce fork. Le paquet npm du projet d’origine ne contient pas ces modifications.
+
 ## Validation et développement
+
+**Résultat local : 30 tests réussis.** Le dépôt contient aussi un workflow macOS pour relancer les contrôles sur GitHub ; son résultat est indépendant de la validation locale.
 
 Tests sur documents et moteurs factices : lecture et écriture entre projets, Git, accès à un serveur local, changements Standard/Accès complet/Lecture seule, persistance des permissions, génération de fragments et directives de visualisation, conservation des restrictions du mode projet et retour arrière d'installation. Initialisation du vrai SDK avec les outils natifs et le serveur d'aperçu dans un HOME temporaire sans compte ni prompt. Aucun document personnel n'a servi aux tests.
 
