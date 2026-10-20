@@ -1,0 +1,10 @@
+CCodex Secure 0.5.11-secure.1
+Base: gkorepanov/ccodex 479aa13d66c9b54685348d0f7b9bdc1c7445a7bf
+
+Suppression du relais natif, de la chaîne Rust, du contrôle distant et de la délégation GPT.
+Isolation macOS du moteur et lanceur de commandes séparé sans réseau ni trousseau.
+Permissions conservées et restrictions sur les fichiers et outils ; pas de Full Access.
+Environnement et état Claude dédiés ; pas de capture RPC ou rétention forcée.
+Installation locale, manifeste SHA-256, dépendances figées et moteur natif épinglé.
+
+La version est expérimentale. Le démarrage sans compte est validé ; l'usage authentifié dans Codex reste à vérifier avec l'utilisateur. Voir README.md pour les limites.

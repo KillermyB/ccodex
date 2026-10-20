@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 
 function refuseManagedEntrypoint(command: string): void {
   if (!existsSync(command)) return;
-  const home = resolve(process.env.CCODEX_HOME ?? join(homedir(), ".ccodex"));
+  const home = resolve(process.env.CCODEX_HOME ?? join(homedir(), ".ccodex-secure"));
   const own = realpathSync(command);
   const managed = [
     process.argv[1],
@@ -18,9 +18,9 @@ function refuseManagedEntrypoint(command: string): void {
   }
 }
 
-export function delegate(command: string, args: readonly string[]): Promise<number> {
+export function delegate(command: string, args: readonly string[], environment: NodeJS.ProcessEnv = process.env): Promise<number> {
   refuseManagedEntrypoint(command);
-  const env = { ...process.env };
+  const env = { ...environment };
   delete env.CCODEX_SHIM_ACTIVE;
   delete env.CODEX_CLI_PATH;
   return new Promise((resolve, reject) => {

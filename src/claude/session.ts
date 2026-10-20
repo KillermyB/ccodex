@@ -1,3 +1,5 @@
+import { shellServer } from "../security/shell.js";
+import { toolDecision } from "../security/policy.js";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { stat } from "node:fs/promises";
@@ -27,6 +29,7 @@ import { visualizeOptions } from "./visualize.js";
 
 export interface SessionSettings {
   cwd: string;
+  readOnly?: boolean;
   /** Claude model value without the picker prefix; null = Claude's default. */
   model: string | null;
   effort: string | null;
@@ -245,8 +248,8 @@ export class ClaudeSession {
    *  wait in meta.json until a turn out of plan mode records them (turning plan mode off records nothing). */
   private keepPlan(): void {
     const { meta } = this.host.gateway;
-    if (this.settings.plan || meta.plan(this.threadId)) {
-      meta.setPlan(this.threadId, { permissionMode: this.settings.permissionMode, model: this.settings.model, effort: this.settings.effort, plan: this.settings.plan });
+    {
+      meta.setPlan(this.threadId, { readOnly: this.settings.readOnly === true, permissionMode: this.settings.permissionMode, model: this.settings.model, effort: this.settings.effort, plan: this.settings.plan });
     }
   }
 
@@ -328,32 +331,37 @@ export class ClaudeSession {
     const settings = this.settings;
     const effort = claudeEffort(this.host.effort(settings));
     return {
-      ...baseOptions(this.host.config),
+      ...baseOptions(this.host.config, settings.cwd, settings.readOnly === true),
       ...visualizeOptions(this.host.visualizePlugin, this.threadId),
       cwd: settings.cwd,
       ...(settings.model ? { model: settings.model } : {}),
       ...(effort ? { effort: effort as never } : {}),
-      ...(settings.fast ? { settings: { fastMode: true } } : {}),
+      settings: { fastMode: settings.fast, syncClaudeAiSkills: false, syncClaudeAiPlugins: false, permissions: { ask: ["mcp__secure__shell"] } },
       permissionMode: claudeMode(settings),
       // Recorded on the chat's first request and reused until compaction, as Claude Code keeps its system prompt.
-      systemPrompt: { type: "preset", preset: "claude_code", append: claudeInstructions(this.host.config.improveModelsFormatting) },
+      systemPrompt: { type: "preset", preset: "claude_code", append: claudeInstructions(this.host.config.improveModelsFormatting) + "\nCCodex Secure: run project commands only with mcp__secure__shell. Native Bash, external MCP, subagents, provider transfers and networked commands are disabled. Commands require user approval. Never request unsandboxed execution." },
       // Claude enters plan mode only as the user sets it (stock's collaboration mode).
-      disallowedTools: ["EnterPlanMode"],
+      mcpServers: { secure: shellServer(settings.cwd, settings.readOnly === true || settings.plan) },
+      tools: ["Read", "Write", "Edit", "Glob", "Grep", "NotebookEdit", "TodoWrite", "AskUserQuestion", "ExitPlanMode"],
+      disallowedTools: ["Bash", "EnterPlanMode", "Agent", "Task", "Skill", "WebFetch", "WebSearch", "mcp__codex__*"],
       // Claude 5 omits its thinking by default: summarized, it shows as the turn's reasoning summary like stock's.
       extraArgs: { "thinking-display": "summarized" },
-      allowDangerouslySkipPermissions: true,
+      allowDangerouslySkipPermissions: false,
       includePartialMessages: true,
       ...(this.exists ? { resume: this.threadId } : { sessionId: this.threadId }),
       ...(this.resumeAt ? { resumeSessionAt: this.resumeAt } : {}),
       canUseTool: this.canUseTool,
       onElicitation: async (request) => this.elicit(request),
       hooks: {
+        PreToolUse: [{ hooks: [async (input: any) => {
+          const decision = toolDecision(input.tool_name, input.tool_input ?? {}, settings.cwd, this.settings.readOnly === true || this.settings.plan);
+          return decision === "pass" ? {} : { hookSpecificOutput: {
+            hookEventName: "PreToolUse" as const, permissionDecision: decision,
+            permissionDecisionReason: decision === "deny" ? "CCodex Secure: action outside the permitted scope." : "CCodex Secure requires your approval.",
+          } };
+        }] }],
         Stop: [{ hooks: [async (input: any) => { this.crons = Array.isArray(input.session_crons) ? input.session_crons.length : 0; return {}; }] }],
         PostCompact: [{ hooks: [async (input: any) => { this.compactSummary?.(String(input.compact_summary ?? "")); return {}; }] }],
-        PreToolUse: [{ matcher: "mcp__codex__.*", hooks: [async (input: any) => {
-          this.codexMcpCall(String(input.tool_name), input.tool_input ?? {}, String(input.tool_use_id), input.agent_id);
-          return {};
-        }] }],
       },
       stderr: (line) => this.host.logger.debug("claude.stderr", { threadId: this.threadId, line }),
     };
@@ -419,7 +427,7 @@ export class ClaudeSession {
     const uuid: string = params.turnId ?? randomUUID();
     await this.applyTurnSettings(params);
     // Its message records the chat's own mode in the transcript.
-    if (!this.settings.plan) this.host.gateway.meta.setPlan(this.threadId, null);
+    this.keepPlan(); // Preserve the read-only policy across native transcript reloads.
     const content = await claudeContent(input, this.settings.cwd);
     // Desktop shows `/goal` messages itself.
     const hidden = typeof content === "string" && /^\/(?:compact|goal)(?:\s|$)/u.test(content);
@@ -576,6 +584,9 @@ export class ClaudeSession {
     this.keepPlan();
     // Like stock, every client with the chat open learns the change (Desktop's composer follows it).
     this.emit("thread/settings/updated", { threadId: this.threadId, threadSettings: this.host.threadSettings(next) });
+    if (this.sdk && (next.readOnly !== previous.readOnly || next.cwd !== previous.cwd || next.plan !== previous.plan)) {
+      this.sdk.close(); this.sdk = undefined; this.discardWarm();
+    }
     if (this.sdk) {
       if (next.model !== previous.model) await this.sdk.setModel(next.model ?? undefined);
       // The CLI settles the mode per model (no auto mode on Haiku falls back to default): a new model re-applies it.
@@ -1267,8 +1278,8 @@ export class ClaudeSession {
 
   private decisionResult(decision: unknown, input: Record<string, unknown>, suggestions: unknown): PermissionResult {
     if (decision === "accept") return { behavior: "allow", updatedInput: input };
-    if (decision === "acceptForSession" || (typeof decision === "object" && decision !== null)) {
-      return { behavior: "allow", updatedInput: input, ...(Array.isArray(suggestions) ? { updatedPermissions: suggestions } : {}) };
+    if (decision === "acceptForSession") {
+      return { behavior: "allow", updatedInput: input,  };
     }
     if (decision === "cancel") return { behavior: "deny", message: "The user cancelled this action.", interrupt: true };
     return { behavior: "deny", message: "The user declined this action." };

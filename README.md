@@ -1,82 +1,53 @@
-<div align="center">
+# CCodex Secure pour macOS
 
-# Claude Code'x
+Version locale 0.5.11-secure.1, dérivée de gkorepanov/ccodex au commit 479aa13d66c9b54685348d0f7b9bdc1c7445a7bf. Projet indépendant, sans affiliation ni validation par OpenAI ou Anthropic. La licence MIT d'origine est conservée.
 
-**Claude models in the Codex App, next to GPT.**
+Cette version permet de choisir Claude dans Codex, avec un moteur Claude Code installé séparément. Elle réduit plusieurs risques de la version originale. Elle reste expérimentale : une conversation authentifiée dans l'application n'a pas encore été validée.
 
-</div>
+## Utilisation sur le Mac
 
-<p align="center">
-  <img src="docs/screenshots/desktop-model-switch.png" width="60%" alt="A Codex App chat moving from GPT-6 to Claude Opus 5.5" />
-</p>
+Le paquet comprend une application « CCodex Secure » qui propose de vérifier les prérequis, d'activer la passerelle, de connecter Claude ou de la désinstaller. Aucune commande n'est à saisir. L'application n'est pas notariée par Apple.
 
-CCodex lets you pick Claude in the Codex App's model picker. Claude chats run on real
-Claude Code with your own Claude subscription, and GPT chats keep running on your Codex
-as before. It works in the desktop app, on servers you open over SSH, and from the
-ChatGPT app on your phone.
+Prérequis de cette construction : Mac Apple silicon, Node.js 22.13 à 26, Codex CLI officiel installé et Claude Code natif 2.1.304. Cette version de Claude a été observée sur le Mac pendant la validation. Les autres versions sont refusées jusqu'à validation explicite.
 
-**Install**
+Commencer par « Vérifier ». Fermer ensuite les conversations actives et quitter Codex avant « Installer ». L'activation modifie les fichiers de démarrage des shells, le lanceur ~/.local/bin/codex et CODEX_CLI_PATH au moyen d'un LaunchAgent dédié. L'application Codex signée reste intacte. Rouvrir Codex après l'activation.
 
-```sh
-curl -fsSL https://github.com/gkorepanov/ccodex/releases/latest/download/install.sh | sh
-```
+« Connecter Claude » utilise le parcours officiel de connexion dans le navigateur avec une configuration dédiée sous ~/.ccodex-secure/claude. La connexion Claude habituelle n'est pas importée. Commencer avec un projet de test sans données confidentielles. La vérification et l'installation ne lancent aucune requête à un modèle.
 
-**Update**
+## Protections appliquées
 
-```sh
-ccodex update && codex app-server daemon restart
-```
+- Aucun relais natif tiers, dépendance Rust ou contrôle à distance.
+- Aucun titre automatique envoyé à GPT depuis un chat Claude. Les transferts de conversation entre fournisseurs sont refusés ; démarrer un nouveau chat pour changer de fournisseur.
+- Aucun agent de délégation Codex ou MCP utilisateur installé. Le seul outil de commandes Claude est fourni par le code local de cette version.
+- Le moteur Claude fonctionne dans un profil macOS Seatbelt. Ses outils de fichiers sont limités au projet, avec une politique supplémentaire avant chaque outil. Les commandes passent dans un processus séparé sans réseau, sans accès au trousseau, aux environnements des autres processus et aux identifiants du moteur.
+- Les écritures et commandes demandent une approbation. Full Access et les profils inconnus sont refusés. La lecture seule interdit les commandes et écritures et est conservée après réouverture.
+- Les configurations Claude utilisateur et projet, MCP externes et skills externes ne sont pas chargés. Les outils natifs Bash, WebFetch, WebSearch, Skill, Agent et Task sont désactivés. Les modules internes du moteur Anthropic restent sous sa responsabilité.
+- Les fichiers .env, clés privées et répertoires de configuration sensibles sont bloqués. Les liens symboliques et liens physiques sont refusés par le contrôle des chemins des outils.
+- L'environnement du moteur est reconstruit avec une liste explicite. Les clés, proxys et endpoints personnalisés du processus parent ne sont pas transmis. La télémétrie et les mises à jour automatiques Claude sont désactivées par configuration d'environnement.
+- L'exécutable Claude est identifié par une empreinte SHA-256 lors de l'installation et vérifié avant chaque lancement. Un changement de binaire impose une nouvelle vérification et installation.
+- Pas de capture RPC, ni de rétention portée à cent ans. La rétention Claude par défaut reste sous le contrôle du moteur ; aucune modification du réglage habituel n'est effectuée.
+- L'installation utilise les bibliothèques locales du paquet et leur manifeste d'empreintes. Aucun npx, téléchargement de moteur ou mise à jour du registre n'est exécuté par setup/update/uninstall.
 
-Then quit and reopen the ChatGPT desktop app.
+## Limites pratiques et risques restants
 
-> [!NOTE]
-> An unofficial community project, not affiliated with OpenAI or Anthropic. It's young,
-> so expect bugs, and please [report them](https://github.com/gkorepanov/ccodex/issues).
+Le moteur reçoit les messages et les fichiers autorisés pour les traiter chez Anthropic. Son trafic API HTTPS reste nécessaire. Les commandes, elles, ne peuvent pas contacter Internet ni un serveur local ; elles ne peuvent donc pas télécharger des paquets, lancer un serveur de prévisualisation ou utiliser un navigateur. Les dépendances d'un projet doivent être installées séparément par l'utilisateur. Les commandes sont arrêtées après 120 secondes et leur sortie est limitée à 1 Mo.
 
-## What you get
+Les fichiers du projet explicitement autorisés peuvent contenir des données confidentielles sous des noms ordinaires. Aucun détecteur de secrets ne peut garantir leur absence. Les fichiers de configuration protégés, opérations Git, connexions externes, subagents et certaines fonctions avancées du logiciel original sont volontairement indisponibles. Les images à envoyer doivent être placées dans le projet et faire au plus 20 Mo.
 
-- **Claude next to GPT** in the model picker, with Claude's effort levels and Fast mode.
-- **Switch models mid-chat.** Move a chat from GPT to Claude or back, and it carries on
-  where it was.
-- **The App works as usual** in Claude chats: approvals, Plan mode, sub-agents, images,
-  `/goal`, side chats, editing and forking messages.
-- **Your phone too.** With remote control on, the ChatGPT mobile app drives Claude chats
-  like GPT ones.
-- **One history with the `claude` CLI.** A chat from the App opens with
-  `claude --resume`, and your CLI sessions show up in the App.
-- **`/cc`** shows the chat's model, context use and your Claude and Codex limits.
+Le moteur natif Anthropic et le moteur Codex officiel restent des dépendances de confiance. Leurs binaires n'ont pas été reconstruits ni audités intégralement. Le profil du moteur Claude autorise HTTPS et les services macOS nécessaires à son authentification ; le refus de réseau affiché pour le projet concerne ses commandes. Cette version n'apporte aucune garantie contre un autre programme ayant déjà les mêmes droits que l'utilisateur, ni contre toutes les attaques par concurrence sur les fichiers.
 
-## How it works
+La version durcie a modifié des fonctions importantes du logiciel original. Elle ne doit pas être présentée comme certifiée ou entièrement sûre. Premier usage recommandé sur un projet jetable, avec contrôle des premières approbations et possibilité de désinstallation.
 
-<p align="center">
-  <img src="docs/how-it-works.png" width="90%" alt="CCodex on your computer and on a remote server, between the Codex App and Claude Code or Codex" />
-</p>
+## Validation effectuée
 
-Install CCodex on every machine where your chats run: your computer for the local app,
-and each server you open over SSH. There are no CCodex servers and no telemetry.
+Compilation TypeScript, tests des contrôles d'outils et de chemins, essais macOS réels sur fichiers factices, refus du réseau local, délai de commande, lecture seule persistante, changement de binaire refusé, tests de passerelle avec moteurs factices. L'installation, la désinstallation et le retour arrière après échec ont aussi été vérifiés dans un HOME temporaire avec launchctl simulé. Le moteur Claude Code 2.1.304 a réussi l'initialisation du SDK et du serveur local sécurisé avec une configuration temporaire sans compte et sans prompt.
 
-## Setup
+Aucun échange avec un modèle authentifié, aucune modification d'un projet personnel et aucune activation de la passerelle dans l'environnement utilisateur n'ont été effectués pendant la préparation.
 
-You need macOS on Apple silicon or Linux (x64 or arm64, glibc 2.31+), with Node.js 22–26.
-The installer adds Codex if it's missing, and Claude Code comes with CCodex.
+## Développement
 
-1. **Install** with the command above, or with
-   `npm install -g @gkorepanov/ccodex && ccodex setup`. Run it as your normal user, not
-   with `sudo`.
-2. **Log in** to whatever you aren't logged in to yet: `ccodex auth codex`,
-   `ccodex auth claude`.
-3. **Restart.** Open a new shell and run `codex app-server daemon restart`. Then:
-   - app connected over SSH: reconnect to the server;
-   - local app on a Mac: quit it with ⌘Q and open it again;
-   - local app on Linux: start it with `CODEX_CLI_PATH=~/.ccodex/bin/codex`.
+Installer les dépendances avec `npm ci --ignore-scripts --omit=optional`, puis utiliser `npm run check` et `npm test` sur macOS. Les anciens tests de fonctionnalités amont restent comme références mais ne font pas partie du contrat de cette version ; plusieurs fonctions ont été retirées. Les nouveaux tests sont dans tests/security. Les tests nécessitent l'accès normal à Seatbelt et aux sockets locaux ; un bac à sable englobant peut empêcher leur exécution.
 
-## If something goes wrong
+Ne pas publier le paquet sous le nom npm de l'auteur original. package.json est privé et les workflows de publication ont été retirés.
 
-- `ccodex doctor` checks the install and tells you what to run.
-- `ccodex uninstall` removes CCodex (add `--purge --yes` to delete `~/.ccodex` too).
-- What setup changes on your machine, settings, logs and known quirks:
-  [`docs/details.md`](docs/details.md).
-
----
-
-[Technical details](docs/details.md) · [Development](docs/details.md#development) · [License](docs/details.md#license)
+Le script scripts/verify-packaged-installation.mjs permet de répéter le test du paquet avec Node et l’option --experimental-test-module-mocks, en lui donnant le chemin absolu du runtime. Il remplace launchctl en mémoire et refuse toute utilisation du HOME réel.

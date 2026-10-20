@@ -1,7 +1,7 @@
 {
   "name": "@gkorepanov/ccodex",
-  "version": "0.5.11",
-  "description": "Unofficial Codex App compatibility bridge for Codex CLI and Claude Code runtimes.",
+  "version": "0.5.11-secure.1",
+  "description": "Local hardened macOS fork of ccodex; no remote relay or automatic provider delegation.",
   "homepage": "https://github.com/gkorepanov/ccodex#readme",
   "repository": {
     "type": "git",
@@ -10,15 +10,11 @@
   "bugs": {
     "url": "https://github.com/gkorepanov/ccodex/issues"
   },
-  "private": false,
+  "private": true,
   "license": "MIT",
   "type": "module",
   "bin": {
     "ccodex": "./dist/cli/main.js"
-  },
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
   },
   "engines": {
     "node": ">=22.13 <27"
@@ -36,38 +32,29 @@
     "examples/config.toml",
     "legal/LICENSES.md",
     "legal/THIRD_PARTY_NOTICES.md",
-    "scripts/migrate-0.4-to-0.5.mjs",
-    "config/compatibility.json"
+    "config/compatibility.json",
+    "npm-shrinkwrap.json",
+    "SECURITY-CHANGES.txt"
   ],
   "scripts": {
-    "build": "npm run build:ts && npm run build:relay",
+    "build": "npm run build:ts",
     "clean:dist": "rm -rf dist",
     "build:ts": "npm run clean:dist && tsc -p config/tsconfig.build.json",
-    "build:relay": "./scripts/build-relay.sh",
-    "check": "tsc -p tsconfig.json --noEmit && npm run check:public-tree",
+    "check": "tsc -p config/tsconfig.build.json --noEmit",
     "check:public-tree": "node scripts/check-public-tree.mjs",
     "dev": "tsx src/cli/main.ts",
-    "claude:install": "./scripts/install-claude-stack.sh",
-    "generate:notices": "node release/generate-notices.mjs",
-    "release:version": "node release/set-version.mjs",
-    "release:promote": "node release/promote.mjs",
-    "test": "vitest run --config config/vitest.config.ts && cargo test --manifest-path relay/Cargo.toml --quiet",
+    "test": "npm run build:ts && npm run test:security",
     "test:unit": "vitest run --config config/vitest.config.ts",
     "test:watch": "vitest --config config/vitest.config.ts",
-    "prepack": "npm run build:ts && npm run generate:notices",
-    "sync:relay-transport": "node scripts/relay-transport.mjs",
-    "check:relay-transport": "node scripts/relay-transport.mjs --check"
+    "test:security": "npm run build:tests && node --experimental-test-module-mocks --test tests/security/*.test.mjs",
+    "build:tests": "tsc tests/fixtures/fakeClaude.ts --outDir test-generated --target ES2023 --module ESNext --moduleResolution Bundler --skipLibCheck"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.296",
     "smol-toml": "1.9.0",
     "uuid": "13.0.2",
-    "ws": "8.21.0"
-  },
-  "optionalDependencies": {
-    "@gkorepanov/ccodex-relay-darwin-arm64": "0.5.11",
-    "@gkorepanov/ccodex-relay-linux-arm64-gnu": "0.5.11",
-    "@gkorepanov/ccodex-relay-linux-x64-gnu": "0.5.11"
+    "ws": "8.21.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@openai/codex": "0.156.0",
@@ -77,5 +64,8 @@
     "tsx": "4.20.6",
     "typescript": "5.9.3",
     "vitest": "4.1.11"
+  },
+  "overrides": {
+    "source-map-js": "1.2.2"
   }
 }

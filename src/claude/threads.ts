@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { workspace } from "../security/policy.js";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -58,9 +59,9 @@ const MAX_PROCESSES = Number(process.env.CCODEX_E2E_MAX_PROCESSES) || 10;
 
 /** A chat's permissions and plan mode from the mode its transcript last recorded (in plan mode, meta.json keeps its own). */
 function recordedPermissions(threadId: string, recorded: string | null | undefined, meta: Meta): Pick<SessionSettings, "permissionMode" | "plan"> {
-  if (recorded !== "plan") return { permissionMode: (recorded ?? "default") as PermissionMode, plan: false };
+  if (recorded !== "plan") return { permissionMode: recorded === "dontAsk" ? "dontAsk" : "default", plan: false };
   const kept = meta.plan(threadId);
-  return { permissionMode: (kept?.permissionMode ?? "default") as PermissionMode, plan: kept?.plan ?? true };
+  return { permissionMode: kept?.permissionMode === "dontAsk" ? "dontAsk" : "default", plan: kept?.plan ?? true };
 }
 
 
@@ -567,6 +568,7 @@ export class ClaudeThreads {
       model: (summary && this.recordedModel(summary)) || this.defaultModel,
       effort: summary ? this.recordedEffort(summary) : null,
       fast: summary?.serviceTier === "fast",
+      readOnly: this.gateway.meta.plan(threadId)?.readOnly ?? true,
       ...recordedPermissions(threadId, summary?.permissionMode, this.gateway.meta),
     };
   }
@@ -574,6 +576,7 @@ export class ClaudeThreads {
   /** Common fields of thread/start|resume|fork responses and thread/settings/updated. */
   public settingsResponse(settings: SessionSettings): JsonObject {
     const permissions = codexPermissions(settings.permissionMode, settings.cwd);
+    if (settings.readOnly) { permissions.sandboxPolicy.type = "readOnly"; permissions.sandboxPolicy.writableRoots = []; permissions.activePermissionProfile.id = ":read-only"; }
     return {
       model: `${this.config.modelPrefix}${settings.model ?? this.defaultModel ?? "default"}`,
       modelProvider: "claude",
@@ -619,7 +622,10 @@ export class ClaudeThreads {
     const model = typeof requested === "string" && this.isClaudeModel(requested) ? this.modelValue(requested) : current.model;
     const tier = params.serviceTier === undefined ? undefined : params.serviceTier;
     return {
-      cwd: params.cwd ?? current.cwd,
+      cwd: workspace(params.cwd ?? current.cwd),
+      readOnly: ["readOnly", "read-only", ":read-only"].includes(params.sandboxPolicy?.type ?? params.sandbox ?? params.permissions)
+        ? true : ["workspaceWrite", "workspace-write", ":workspace"].includes(params.sandboxPolicy?.type ?? params.sandbox ?? params.permissions)
+          ? false : current.readOnly ?? false,
       model,
       effort: params.effort ?? params.collaborationMode?.settings?.reasoning_effort ?? current.effort,
       fast: tier === undefined ? current.fast : tier === "fast" || tier === "priority",
@@ -862,18 +868,7 @@ export class ClaudeThreads {
   }
 
   public async skills(cwds: readonly string[]): Promise<Map<string, JsonObject[]>> {
-    const entries = await Promise.all(cwds.map(async (cwd) => {
-      const cached = this.skillCache.get(cwd);
-      if (!cached || Date.now() - cached.at > 5 * 60_000) {
-        const skills = withProbeQuery(this.config, cwd, (probe) => probe.supportedCommands())
-          .then((commands) => Promise.all(commands.map((command) => mapSkill(this.config, cwd, command))));
-        // An outdated list answers at once while the fresh one loads.
-        this.skillCache.set(cwd, { at: Date.now(), skills: cached?.skills ?? skills.catch(() => []) });
-        if (cached) void skills.then((fresh) => this.skillCache.set(cwd, { at: Date.now(), skills: Promise.resolve(fresh) }), () => undefined);
-      }
-      return [cwd, await this.skillCache.get(cwd)!.skills] as const;
-    }));
-    return new Map(entries);
+    return new Map(cwds.map((cwd) => [cwd, []]));
   }
 
   // ---- side chats (/side → Claude's native /btw) ----
@@ -1135,7 +1130,7 @@ export class ClaudeThreads {
     const thread = this.decorate(this.freshThread(session));
     // After the response, as stock: Desktop hides its new-chat draft's `thread/started` only once it knows the id.
     setImmediate(() => this.gateway.emit(threadId, "thread/started", { thread }));
-    this.gateway.titles.track(threadId);
+    // No cross-provider title generation.
     this.prewarm(session);
     return { thread, ...this.settingsResponse(settings) };
   }
@@ -1147,12 +1142,8 @@ export class ClaudeThreads {
   private warmSession?: ClaudeSession;
   private warmTimer?: NodeJS.Timeout;
 
-  private prewarm(session: ClaudeSession, delayMs = 0): void {
-    clearTimeout(this.warmTimer);
-    if (this.warmSession !== session) this.warmSession?.discardWarm();
-    this.warmSession = session;
-    this.warmTimer = setTimeout(() => { if (this.sessions.get(session.threadId) === session) session.prewarm(); }, delayMs);
-    this.warmTimer.unref();
+  private prewarm(_session: ClaudeSession, _delayMs = 0): void {
+    // No speculative native process initialization.
   }
 
   /** A new session, not announced (thread/start announces it; a provider switch keeps it hidden). */

@@ -6,23 +6,11 @@ import type { JsonObject } from "../protocol/codex.js";
 import type { SessionSettings } from "./session.js";
 import { modelCatalogValue, normalizeClaudeModelIdentifier } from "./modelSelection.js";
 import { claudeSkillFile } from "./toolMapper.js";
+import { secureOptions } from "../security/policy.js";
 import { ULTRA } from "./delegation.js";
 
-export function claudeEnvironment(): Record<string, string | undefined> {
-  // Claude chats are a desktop app's, like Claude Desktop's: background commands run with no time limit (Claude Code
-  // stops them after 30 min to 2 h in Agent SDK sessions, which it takes for unattended).
-  const env: Record<string, string | undefined> = { ...process.env, CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1", CLAUDE_CODE_ENTRYPOINT: "claude-desktop" };
-  delete env.CCODEX_SHIM_ACTIVE;
-  delete env.CODEX_CLI_PATH;
-  return env;
-}
-
-export function baseOptions(config: Config): Options {
-  return {
-    pathToClaudeCodeExecutable: config.claudeBinary,
-    settingSources: ["user", "project", "local"],
-    env: claudeEnvironment(),
-  };
+export function baseOptions(config: Config, cwd?: string, readOnly = true): Options {
+  return { pathToClaudeCodeExecutable: config.claudeBinary, ...secureOptions(config, cwd, readOnly) };
 }
 
 // ---- permissions: modes map directly, no sandbox emulation ----
@@ -37,13 +25,15 @@ export interface CodexPermissions {
 /** Codex permission fields (thread/start, turn/start, settings/update) → Claude permission mode; undefined = none sent. */
 function chosenPermissionMode(params: JsonObject, current: PermissionMode): PermissionMode | undefined {
   const sandbox = params.sandboxPolicy?.type ?? params.sandbox ?? params.permissions;
-  const fullAccess = sandbox === "dangerFullAccess" || sandbox === "danger-full-access" || sandbox === ":danger-full-access";
-  if (params.approvalsReviewer && params.approvalsReviewer !== "user") return "auto";
-  if (params.approvalPolicy === "never") return fullAccess ? "bypassPermissions" : "dontAsk";
-  if (params.approvalPolicy !== undefined && params.approvalPolicy !== null) return "default";
-  if (fullAccess) return "bypassPermissions";
-  if (params.approvalsReviewer === "user" && current === "auto") return "default";
-  return undefined;
+  if (sandbox != null && !["readOnly", "read-only", ":read-only", "workspaceWrite", "workspace-write", ":workspace", ":workspace-write", "dangerFullAccess", "danger-full-access", ":danger-full-access"].includes(sandbox)) {
+    throw new Error("Unsupported permission profile: refusing to widen its scope.");
+  }
+  if (["dangerFullAccess", "danger-full-access", ":danger-full-access"].includes(sandbox)) {
+    throw new Error("CCodex Secure refuses Full Access. Choose the workspace permission profile.");
+  }
+  // Auto-review and imported permissive modes never grant authority in this fork.
+  if (params.approvalPolicy === "never") return "dontAsk";
+  return "default";
 }
 
 /**
@@ -64,18 +54,12 @@ export function claudeMode(settings: Pick<SessionSettings, "permissionMode" | "p
 }
 
 export function codexPermissions(mode: string | null, cwd: string): CodexPermissions {
-  if (mode === "bypassPermissions") {
-    return {
-      approvalPolicy: "never", approvalsReviewer: "user", sandboxPolicy: { type: "dangerFullAccess" },
-      activePermissionProfile: { id: ":danger-full-access", extends: null },
-    };
-  }
   const sandboxPolicy = {
     type: "workspaceWrite", writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false,
   };
   const profile = { id: ":workspace", extends: null };
   if (mode === "dontAsk") return { approvalPolicy: "never", approvalsReviewer: "user", sandboxPolicy, activePermissionProfile: profile };
-  if (mode === "auto") return { approvalPolicy: "on-request", approvalsReviewer: "auto_review", sandboxPolicy, activePermissionProfile: profile };
+
   return { approvalPolicy: "on-request", approvalsReviewer: "user", sandboxPolicy, activePermissionProfile: profile };
 }
 
@@ -146,7 +130,7 @@ export async function withProbeQuery<T>(config: Config, cwd: string | undefined,
   const abort = new AbortController();
   const probe = query({
     prompt: idle(abort.signal),
-    options: { ...baseOptions(config), ...(cwd ? { cwd } : {}), persistSession: false, abortController: abort, allowedTools: [] },
+    options: { ...baseOptions(config, cwd, true), ...(cwd ? { cwd } : {}), persistSession: false, abortController: abort, allowedTools: [] },
   });
   let timer: NodeJS.Timeout | undefined;
   try {

@@ -138,7 +138,7 @@ export class Connection {
       this.ephemeralRequests.add(message.id);
     }
     if (message.method === undefined) {
-      if (typeof message.id === "string" && message.id.startsWith("ccodex:")) this.gateway.resolveServerRequest(message);
+      if (typeof message.id === "string" && message.id.startsWith("ccodex:")) this.gateway.resolveServerRequest(message, this);
       else this.forward(text);
       return;
     }

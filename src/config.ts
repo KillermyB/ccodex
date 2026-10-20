@@ -37,10 +37,10 @@ Keep the complete title, including emoji, within 36 characters.
 Return only the title.`;
 
 export function defaultConfigToml(): string {
-  return `# Remove or comment out rename_prompt to restore stock Codex title generation.
-rename_prompt = """
-${DEFAULT_RENAME_PROMPT}
-"""
+  return `# CCodex Secure: no GPT titles, RPC captures, project plugins or remote relay.
+log_level = "warn"
+rpc_capture = false
+claude_visualize = false
 `;
 }
 
@@ -66,26 +66,21 @@ export function runtimePlatformKey(): string {
 }
 
 export function bundledClaudeExecutable(): string {
-  const packageName = CLAUDE_PACKAGES[runtimePlatformKey()];
-  if (!packageName) return "claude";
-  try {
-    const binary = join(dirname(require.resolve(`${packageName}/package.json`)), "claude");
-    if (existsSync(binary)) return binary;
-  } catch {
-    // Fall back to a separately installed Claude CLI.
+  for (const binary of ["/opt/homebrew/bin/claude", "/usr/local/bin/claude"]) {
+    if (existsSync(binary)) return realpathSync(binary);
   }
-  return "claude";
+  throw new Error("Install the official Claude Code CLI first, or configure an absolute claude_binary path.");
 }
 
 export const expandHome = (value: string) =>
   value === "~" ? homedir() : value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
 
 export function productHome(): string {
-  return expandHome(process.env.CCODEX_HOME ?? join(homedir(), ".ccodex"));
+  return expandHome(process.env.CCODEX_HOME ?? join(homedir(), ".ccodex-secure"));
 }
 
 export function claudeHome(): string {
-  return process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+  return join(productHome(), "claude");
 }
 
 export function codexHome(): string {
@@ -134,10 +129,10 @@ export function loadConfig(): Config {
   const configuredCodex = process.env.CCODEX_CODEX ?? file.codex_binary as string | undefined;
   const codex = configuredCodex ? resolve(expandHome(configuredCodex)) : findInstalledCodex(home);
   if (!codex) throw new Error("No `codex` found on PATH. Install it with `npm i -g @openai/codex` or set codex_binary in ~/.ccodex/config.toml.");
-  const renamePrompt = typeof file.rename_prompt === "string" && file.rename_prompt.trim() ? file.rename_prompt.trim() : undefined;
+  const renamePrompt = undefined;
   return {
     codex,
-    claudeBinary: process.env.CCODEX_CLAUDE_BINARY ?? file.claude_binary ?? bundledClaudeExecutable(),
+    claudeBinary: resolve(expandHome(process.env.CCODEX_CLAUDE_BINARY ?? file.claude_binary ?? bundledClaudeExecutable())),
     claudeHome: claudeHome(),
     productHome: home,
     dataDir: expandHome(process.env.CCODEX_DATA_DIR ?? file.data_dir ?? join(home, "state")),
@@ -145,13 +140,13 @@ export function loadConfig(): Config {
       ?? join(codexHome(), "app-server-control", "app-server-control.sock")),
     modelPrefix: file.model_prefix ?? "claude:",
     logLevel: process.env.CCODEX_LOG_LEVEL as Config["logLevel"] ?? file.log_level ?? "info",
-    rpcCapture: process.env.CCODEX_RPC_CAPTURE ? process.env.CCODEX_RPC_CAPTURE === "1" : file.rpc_capture ?? false,
+    rpcCapture: false,
     rpcCaptureMaxBytes: file.rpc_capture_max_bytes ?? 1_073_741_824,
     rpcLimitBytes: (file.rpc_limit_mb ?? 10) * 1_000_000,
     ...(renamePrompt ? { renamePrompt } : {}),
     ...(file.title_model ? { titleModel: file.title_model as string } : {}),
     delegateCodex: expandHome(process.env.CCODEX_DELEGATE_CODEX ?? file.delegate_codex ?? codex),
     improveModelsFormatting: file.improve_models_formatting_for_codex_app ?? true,
-    claudeVisualize: file.claude_visualize ?? true,
+    claudeVisualize: false,
   };
 }

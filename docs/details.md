@@ -1,142 +1,53 @@
-# CCodex: technical details
+# CCodex Secure pour macOS
 
-Back to the [README](../README.md).
+Version locale 0.5.11-secure.1, dérivée de gkorepanov/ccodex au commit 479aa13d66c9b54685348d0f7b9bdc1c7445a7bf. Projet indépendant, sans affiliation ni validation par OpenAI ou Anthropic. La licence MIT d'origine est conservée.
 
-## Features in detail
+Cette version permet de choisir Claude dans Codex, avec un moteur Claude Code installé séparément. Elle réduit plusieurs risques de la version originale. Elle reste expérimentale : une conversation authentifiée dans l'application n'a pas encore été validée.
 
-- **Claude models in the model picker**, next to `gpt-*` (ids `claude:…`), with Claude's
-  effort levels and Fast mode. Codex's `ultra` effort runs Claude at `max` and has it
-  delegate to sub-agents proactively, as stock does for GPT.
-- **Switch providers mid-chat.** Pick a GPT model in a Claude chat (or the other way
-  round) and the conversation is compacted into a summary that the other provider
-  continues from. The App keeps showing one chat with one history; edits and forks across
-  the switch work.
-- **Codex App features on Claude chats**: approvals, Plan mode, `/goal`, `/compact`, fork,
-  message edits, steering and queued messages, Stop, side chats (`/side`, served by
-  Claude's `/btw`), images, Claude's questions as the App's question prompts, its task
-  list as the turn's to-do list, and thinking as reasoning summaries.
-- **Sub-agents and background commands like stock's**: Claude sub-agents open as their
-  own threads, background shell commands show as background terminals, and messages
-  between Claude chats show as the App's messages between tasks.
-- **Claude skills in the `$` picker**, beside Codex skills, in Claude and GPT chats.
-- **Search**: the sidebar search and find-in-chat cover Claude chats too.
-- **Phone**: turn on remote control in the Codex App (or
-  `codex app-server daemon enable-remote-control` on the host) and pair the ChatGPT
-  mobile app as usual; it drives Claude chats like GPT ones.
-- **Your `claude` CLI sessions show up** in the App, and chats from the App resume in
-  `claude --resume <id>` (a Claude chat's id is its Claude session id). While another live
-  Claude process has a chat open, the App can't start a turn in it.
-- **Claude can delegate to Codex** through the `codex-wrapper` agent that setup installs;
-  what Codex does streams into the Claude chat.
-- **`/cc` status card** (also `/ccstatus`, `/ccodex`, `/ccstate`, with or without the
-  slash, or *CCodex status* in the `/` menu): the chat's model, effort, permission mode,
-  context use, session state, and Claude and Codex plan limits. Sent while a turn runs,
-  it answers at once and never reaches the model.
-- **Emoji thread titles** from a small GPT model and an editable prompt; Claude chats get
-  a ` ✳️` suffix.
+## Utilisation sur le Mac
 
-## App controls in Claude chats
+Le paquet comprend une application « CCodex Secure » qui propose de vérifier les prérequis, d'activer la passerelle, de connecter Claude ou de la désinstaller. Aucune commande n'est à saisir. L'application n'est pas notariée par Apple.
 
-Claude chats follow the App's own controls:
+Prérequis de cette construction : Mac Apple silicon, Node.js 22.13 à 26, Codex CLI officiel installé et Claude Code natif 2.1.304. Cette version de Claude a été observée sur le Mac pendant la validation. Les autres versions sont refusées jusqu'à validation explicite.
 
-| Codex App | Claude Code |
-|---|---|
-| *Full Access* / *Ask for approval* / *Approve for me* | permission mode `bypassPermissions` / `default` / `auto` |
-| Plan mode | permission mode `plan` |
-| Reasoning effort | effort (`ultra` = `max` + proactive sub-agents) |
-| Fast | Claude fast mode |
+Commencer par « Vérifier ». Fermer ensuite les conversations actives et quitter Codex avant « Installer ». L'activation modifie les fichiers de démarrage des shells, le lanceur ~/.local/bin/codex et CODEX_CLI_PATH au moyen d'un LaunchAgent dédié. L'application Codex signée reste intacte. Rouvrir Codex après l'activation.
 
-## How it works
+« Connecter Claude » utilise le parcours officiel de connexion dans le navigateur avec une configuration dédiée sous ~/.ccodex-secure/claude. La connexion Claude habituelle n'est pas importée. Commencer avec un projet de test sans données confidentielles. La vérification et l'installation ne lancent aucune requête à un modèle.
 
-CCodex is a thin gateway in front of your installed `codex app-server`: the App starts
-CCodex's `codex`, one stock app-server serves every GPT chat unchanged, and `claude:*`
-chats run on the Claude Agent SDK with Claude's transcripts in `~/.claude/projects` as
-their only source of truth. The only state CCodex adds is an optional
-`~/.ccodex/state/meta.json` (provider-switch history, archive flags and sections of Claude
-chats). Plain `codex …` commands (TUI, `exec`, `login`) run your installed Codex; `codex
-mcp-server`, removed from Codex in `0.154`, is served by CCodex on top of `codex exec`.
+## Protections appliquées
 
-## What setup changes
+- Aucun relais natif tiers, dépendance Rust ou contrôle à distance.
+- Aucun titre automatique envoyé à GPT depuis un chat Claude. Les transferts de conversation entre fournisseurs sont refusés ; démarrer un nouveau chat pour changer de fournisseur.
+- Aucun agent de délégation Codex ou MCP utilisateur installé. Le seul outil de commandes Claude est fourni par le code local de cette version.
+- Le moteur Claude fonctionne dans un profil macOS Seatbelt. Ses outils de fichiers sont limités au projet, avec une politique supplémentaire avant chaque outil. Les commandes passent dans un processus séparé sans réseau, sans accès au trousseau, aux environnements des autres processus et aux identifiants du moteur.
+- Les écritures et commandes demandent une approbation. Full Access et les profils inconnus sont refusés. La lecture seule interdit les commandes et écritures et est conservée après réouverture.
+- Les configurations Claude utilisateur et projet, MCP externes et skills externes ne sont pas chargés. Les outils natifs Bash, WebFetch, WebSearch, Skill, Agent et Task sont désactivés. Les modules internes du moteur Anthropic restent sous sa responsabilité.
+- Les fichiers .env, clés privées et répertoires de configuration sensibles sont bloqués. Les liens symboliques et liens physiques sont refusés par le contrôle des chemins des outils.
+- L'environnement du moteur est reconstruit avec une liste explicite. Les clés, proxys et endpoints personnalisés du processus parent ne sont pas transmis. La télémétrie et les mises à jour automatiques Claude sont désactivées par configuration d'environnement.
+- L'exécutable Claude est identifié par une empreinte SHA-256 lors de l'installation et vérifié avant chaque lancement. Un changement de binaire impose une nouvelle vérification et installation.
+- Pas de capture RPC, ni de rétention portée à cent ans. La rétention Claude par défaut reste sous le contrôle du moteur ; aucune modification du réglage habituel n'est effectuée.
+- L'installation utilise les bibliothèques locales du paquet et leur manifeste d'empreintes. Aucun npx, téléchargement de moteur ou mise à jour du registre n'est exécuté par setup/update/uninstall.
 
-- Installs the version under `~/.ccodex/versions/` and the `codex` / `ccodex` shims in
-  `~/.ccodex/bin`, which a managed block (`# >>> ccodex >>>`) puts first on `PATH` in your
-  Bash, Zsh and Fish startup files.
-- Links `~/.local/bin/codex` to the shim; a `codex` found there moves to
-  `~/.ccodex/backups/remote-codex` and stays the Codex CCodex runs.
-- macOS: sets `CODEX_CLI_PATH` for the local App (`launchctl setenv` plus a login
-  LaunchAgent `dev.ccodex.codex-cli-path`), so the App starts CCodex instead of its bundled
-  `codex`. The signed `.app` is never touched, so its auto-updates keep working.
-- Claude Code: sets `cleanupPeriodDays: 36500` in `~/.claude/settings.json` when unset
-  (Claude deletes transcripts older than 30 days by default, and with them your Claude
-  chats), and installs the `codex-wrapper` agent and the `codex` MCP server (user scope).
-- Never restarts a running gateway: a new version takes over after
-  `codex app-server daemon restart`.
+## Limites pratiques et risques restants
 
-## Uninstall
+Le moteur reçoit les messages et les fichiers autorisés pour les traiter chez Anthropic. Son trafic API HTTPS reste nécessaire. Les commandes, elles, ne peuvent pas contacter Internet ni un serveur local ; elles ne peuvent donc pas télécharger des paquets, lancer un serveur de prévisualisation ou utiliser un navigateur. Les dépendances d'un projet doivent être installées séparément par l'utilisateur. Les commandes sont arrêtées après 120 secondes et leur sortie est limitée à 1 Mo.
 
-Uninstall stops CCodex's gateway and undoes the `PATH`, `~/.local/bin/codex` and
-`CODEX_CLI_PATH` changes; what setup added to `~/.claude` stays. If `ccodex` is gone from
-`PATH`, use the release's `uninstall.sh` (`… | sh -s -- --purge` to purge):
-`curl -fsSL https://github.com/gkorepanov/ccodex/releases/latest/download/uninstall.sh | sh`
+Les fichiers du projet explicitement autorisés peuvent contenir des données confidentielles sous des noms ordinaires. Aucun détecteur de secrets ne peut garantir leur absence. Les fichiers de configuration protégés, opérations Git, connexions externes, subagents et certaines fonctions avancées du logiciel original sont volontairement indisponibles. Les images à envoyer doivent être placées dans le projet et faire au plus 20 Mo.
 
-## Upgrading from 0.4
+Le moteur natif Anthropic et le moteur Codex officiel restent des dépendances de confiance. Leurs binaires n'ont pas été reconstruits ni audités intégralement. Le profil du moteur Claude autorise HTTPS et les services macOS nécessaires à son authentification ; le refus de réseau affiché pour le projet concerne ses commandes. Cette version n'apporte aucune garantie contre un autre programme ayant déjà les mêmes droits que l'utilisateur, ni contre toutes les attaques par concurrence sur les fichiers.
 
-Run `ccodex update` (or reinstall), then `codex app-server daemon restart`.
-0.5 keeps no databases of its own; setup migrates 0.4's state once before it activates
-0.5 (a failed migration activates nothing). Provider-switch history, archive flags,
-sections and names carry over. Claude chats get their Claude session ids (links to 0.4
-thread ids stop working), 0.4's side chats are archived, and chats whose transcripts
-Claude's 30-day cleanup deleted come back as text. The 0.4 databases move to
-`~/.ccodex.0.4-backup`.
+La version durcie a modifié des fonctions importantes du logiciel original. Elle ne doit pas être présentée comme certifiée ou entièrement sûre. Premier usage recommandé sur un projet jetable, avec contrôle des premières approbations et possibilité de désinstallation.
 
-## Config file
+## Validation effectuée
 
-`~/.ccodex/config.toml` (every key optional; all of them are in
-[`examples/config.toml`](../examples/config.toml)):
+Compilation TypeScript, tests des contrôles d'outils et de chemins, essais macOS réels sur fichiers factices, refus du réseau local, délai de commande, lecture seule persistante, changement de binaire refusé, tests de passerelle avec moteurs factices. L'installation, la désinstallation et le retour arrière après échec ont aussi été vérifiés dans un HOME temporaire avec launchctl simulé. Le moteur Claude Code 2.1.304 a réussi l'initialisation du SDK et du serveur local sécurisé avec une configuration temporaire sans compte et sans prompt.
 
-- `rename_prompt` — the title prompt; remove it for stock Codex titles (manual names
-  always win). `title_model` — the model that writes them.
-- `improve_models_formatting_for_codex_app` (default `true`) — adds
-  [`instructions/ccodex_extra_common_instructions.md`](../instructions/ccodex_extra_common_instructions.md)
-  (formulas and plots the App renders) to the App's instructions for Codex models and to
-  Claude's; Claude also gets
-  [`instructions/ccodex_extra_claude_instructions.md`](../instructions/ccodex_extra_claude_instructions.md)
-  (what the App shows beyond a terminal).
-- `claude_visualize` (default `true`) — Claude chats get Codex's bundled Visualize skill (while it is on in Codex) and
-  draw interactive visuals in the chat as GPT chats do; `false` leaves Claude's context as it is.
-- `rpc_limit_mb` (default `10`) — the most CCodex sends the App in one message or as one command's output (how the
-  App shows a remote host's image or video): a bigger answer fails, a bigger notification is dropped, the output stops
-  there. One huge message holds up every chat over SSH and can drop the phone's connection. `0` turns it off.
-- `log_level` — `debug`, `info` (default), `warn`, `error`.
-- `codex_binary`, `delegate_codex`, `claude_binary` — use a specific `codex` or `claude`.
+Aucun échange avec un modèle authentifié, aucune modification d'un projet personnel et aucune activation de la passerelle dans l'environnement utilisateur n'ont été effectués pendant la préparation.
 
-## Troubleshooting
+## Développement
 
-- `ccodex doctor` checks Node, Codex and Claude and their logins, the prebuilt native
-  relay (`@gkorepanov/ccodex-relay-*`), the gateway and the install, and says what to run.
-- The gateway's log is `~/.codex/app-server-daemon/app-server.stderr.log`, rewritten at
-  each gateway start; set `log_level = "debug"` for more.
-- For a bug report, `rpc_capture = true` records every App message to
-  `~/.ccodex/state/rpc.jsonl` (mode `0600`, capped at 1 GiB, prompts and outputs
-  included). Off by default; it never leaves your disk.
-- The App's built-in `/status` differs by client (Desktop may show only its OpenAI account);
-  `/cc` shows the same in every client.
-- A gateway restart (`codex app-server daemon restart`, an update) stops running chats; the
-  App reconnects and reopens its chats, as with a stock app-server restart.
-- On a Mac, the App's browser works only for processes the running App launched, so the App
-  replaces a gateway started from a terminal (or by an earlier, now closed App launch) with
-  its own; chats running in the old one stop.
+Installer les dépendances avec `npm ci --ignore-scripts --omit=optional`, puis utiliser `npm run check` et `npm test` sur macOS. Les anciens tests de fonctionnalités amont restent comme références mais ne font pas partie du contrat de cette version ; plusieurs fonctions ont été retirées. Les nouveaux tests sont dans tests/security. Les tests nécessitent l'accès normal à Seatbelt et aux sockets locaux ; un bac à sable englobant peut empêcher leur exécution.
 
-## Development
+Ne pas publier le paquet sous le nom npm de l'auteur original. package.json est privé et les workflows de publication ont été retirés.
 
-```sh
-npm ci --ignore-scripts
-npm run check
-npm test                  # unit and black-box gateway tests, relay tests
-scripts/e2e/run.sh        # rootless podman, real models, copies of your credentials
-```
-
-## License
-
-MIT — see [`LICENSE`](../LICENSE). Third-party licenses and notices:
-[`legal/LICENSES.md`](../legal/LICENSES.md), [`legal/THIRD_PARTY_NOTICES.md`](../legal/THIRD_PARTY_NOTICES.md).
+Le script scripts/verify-packaged-installation.mjs permet de répéter le test du paquet avec Node et l’option --experimental-test-module-mocks, en lui donnant le chemin absolu du runtime. Il remplace launchctl en mémoire et refuse toute utilisation du HOME réel.

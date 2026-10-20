@@ -11,6 +11,7 @@ export interface Segment {
 }
 
 export interface Plan {
+  readonly readOnly?: boolean;
   readonly permissionMode: string;
   readonly model: string | null;
   readonly effort: string | null;

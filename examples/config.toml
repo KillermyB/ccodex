@@ -1,35 +1,5 @@
-# ~/.ccodex/config.toml — every key is optional.
-
-# Remove or comment out rename_prompt to restore stock Codex title generation.
-rename_prompt = """
-Create a concise, vivid, memorable title for the task.
-Start with exactly one rare, expressive, context-relevant emoji followed by one space.
-Avoid generic decorative emoji when a more specific symbol fits.
-Keep the complete title, including emoji, within 36 characters.
-Return only the title.
-"""
-# title_model = "gpt-6-luna"        # default: the first visible luna/mini Codex model
-
-# Adds instructions/ccodex_extra_common_instructions.md (formulas and plots the App renders) to what Codex and
-# Claude models get in the App.
-improve_models_formatting_for_codex_app = true
-
-# Codex's bundled Visualize skill (while it is on in Codex) in Claude chats too: Claude draws interactive visuals in the
-# chat as GPT does.
-claude_visualize = true
-
-# codex_binary = "/path/to/codex"   # default: the first `codex` on PATH that is not CCodex
-# delegate_codex = "/path/to/codex" # what plain `codex …` (TUI, exec, login) runs; default: codex_binary
-# claude_binary = "/path/to/claude" # default: the Claude Code bundled with the Agent SDK
-# data_dir = "~/.ccodex/state"
-# model_prefix = "claude:"
-
-# The most CCodex sends the App in one message, or as the output of one command the App runs here (it shows a remote
-# host's image or video that way), in MB: a bigger answer fails, a bigger notification is dropped, a command's output
-# stops there. Over SSH or on the phone, one huge message holds up every chat. 0: no limit.
-rpc_limit_mb = 10
-
-log_level = "info"
-# Codex App RPC capture under data_dir (rpc.jsonl, mode 0600, rolling; holds prompts and outputs). Off by default.
-rpc_capture = false
-rpc_capture_max_bytes = 1073741824
+# CCodex Secure
+# These settings never enable remote control, RPC capture or cross-provider titles.
+log_level = "warn"
+# Optional absolute path to your official Claude Code native executable:
+# claude_binary = "/opt/homebrew/bin/claude"

@@ -1,16 +1,17 @@
+import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 export function atomicWrite(path: string, content: string, mode: number): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.tmp-${process.pid}`;
-  writeFileSync(temporary, content, { mode });
+  const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  writeFileSync(temporary, content, { mode, flag: "wx" });
   chmodSync(temporary, mode);
   renameSync(temporary, path);
 }
 
 export function atomicSymlink(target: string, path: string): void {
-  const temporary = `${path}.tmp-${process.pid}`;
+  const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
   rmSync(temporary, { force: true });
   symlinkSync(target, temporary);
   renameSync(temporary, path);

@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { atomicWrite } from "../management/files.js";
 
-export const CODEX_CLI_PATH_LABEL = "dev.ccodex.codex-cli-path";
+export const CODEX_CLI_PATH_LABEL = "dev.ccodex.secure-cli-path";
 export const CODEX_CLI_PATH_ENV = "CODEX_CLI_PATH";
 const LAUNCHCTL = "/bin/launchctl";
 const MANAGED_MARKER = "Managed by CCodex — run 'ccodex uninstall' to remove.";

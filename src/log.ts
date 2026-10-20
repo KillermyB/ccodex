@@ -12,6 +12,9 @@ function redact(value: unknown, key = ""): unknown {
   if (value && typeof value === "object") {
     return Object.fromEntries(Object.entries(value).map(([child, item]) => [child, redact(item, child)]));
   }
+  if (typeof value === "string") return value
+    .replace(/\b(?:sk-ant-|sk-proj-|sk-)[A-Za-z0-9_-]{10,}/gu, "<REDACTED>")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/giu, "Bearer <REDACTED>");
   return value;
 }
 

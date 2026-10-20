@@ -31,3 +31,5 @@ lab/apple-container/.build/
 !legal/THIRD_PARTY_NOTICES.md
 !agents/*.md
 !instructions/*.md
+
+test-generated/

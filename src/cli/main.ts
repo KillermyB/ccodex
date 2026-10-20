@@ -41,8 +41,7 @@ async function main(): Promise<number> {
 
   const { startGateway } = await import("../gateway/server.js");
   const logger = new Logger(config.logLevel);
-  const remoteControl = process.env.CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED !== "1"
-    && (invocation.stockArgs.includes("--remote-control") || loadDaemonSettings().remoteControlEnabled);
+  const remoteControl = false;
   const stockArgs = invocation.stockArgs.filter((arg) => arg !== "--remote-control");
   let stop!: () => void;
   const stopped = new Promise<void>((resolve) => { stop = resolve; });

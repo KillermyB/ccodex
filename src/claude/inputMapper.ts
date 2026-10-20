@@ -1,3 +1,5 @@
+import { permittedPath } from "../security/policy.js";
+import { stat } from "node:fs/promises";
 import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, resolve } from "node:path";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -28,6 +30,8 @@ export async function claudeContent(input: readonly UserInput[], cwd: string): P
         : { type: "image", source: { type: "url", url: item.url } });
     } else if (item.type === "localImage") {
       const path = isAbsolute(item.path) ? item.path : resolve(cwd, item.path);
+      if (!permittedPath(path, cwd)) throw invalidParams("Copy attachments into the authorized project folder first.");
+      if ((await stat(path)).size > 20 * 1024 * 1024) throw invalidParams("Image exceeds the 20 MB limit.");
       const mediaType = mediaTypes[extname(path).toLowerCase()];
       if (!mediaType) throw invalidParams(`Unsupported image type for '${item.path}'.`);
       content.push({ type: "image", source: { type: "base64", media_type: mediaType, data: (await readFile(path)).toString("base64") } });
