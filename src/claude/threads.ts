@@ -58,7 +58,9 @@ const RESUME_WARM_MS = Number(process.env.CCODEX_E2E_RESUME_WARM_MS) || 10_000;
 const MAX_PROCESSES = Number(process.env.CCODEX_E2E_MAX_PROCESSES) || 10;
 
 /** A chat's permissions and plan mode from the mode its transcript last recorded (in plan mode, meta.json keeps its own). */
-function recordedPermissions(threadId: string, recorded: string | null | undefined, meta: Meta): Pick<SessionSettings, "permissionMode" | "plan"> {
+function recordedPermissions(threadId: string, recorded: string | null | undefined, meta: Meta, personal = false): Pick<SessionSettings, "permissionMode" | "plan"> {
+  const keptMode = meta.plan(threadId)?.permissionMode;
+  if (personal && keptMode === "bypassPermissions") return { permissionMode: "bypassPermissions", plan: meta.plan(threadId)?.plan ?? recorded === "plan" };
   if (recorded !== "plan") return { permissionMode: recorded === "dontAsk" ? "dontAsk" : "default", plan: false };
   const kept = meta.plan(threadId);
   return { permissionMode: kept?.permissionMode === "dontAsk" ? "dontAsk" : "default", plan: kept?.plan ?? true };
@@ -569,13 +571,13 @@ export class ClaudeThreads {
       effort: summary ? this.recordedEffort(summary) : null,
       fast: summary?.serviceTier === "fast",
       readOnly: this.gateway.meta.plan(threadId)?.readOnly ?? true,
-      ...recordedPermissions(threadId, summary?.permissionMode, this.gateway.meta),
+      ...recordedPermissions(threadId, summary?.permissionMode, this.gateway.meta, this.config.accessMode === "personal"),
     };
   }
 
   /** Common fields of thread/start|resume|fork responses and thread/settings/updated. */
   public settingsResponse(settings: SessionSettings): JsonObject {
-    const permissions = codexPermissions(settings.permissionMode, settings.cwd);
+    const permissions = codexPermissions(settings.permissionMode, settings.cwd, this.config.accessMode === "personal");
     if (settings.readOnly) { permissions.sandboxPolicy.type = "readOnly"; permissions.sandboxPolicy.writableRoots = []; permissions.activePermissionProfile.id = ":read-only"; }
     return {
       model: `${this.config.modelPrefix}${settings.model ?? this.defaultModel ?? "default"}`,
@@ -622,14 +624,14 @@ export class ClaudeThreads {
     const model = typeof requested === "string" && this.isClaudeModel(requested) ? this.modelValue(requested) : current.model;
     const tier = params.serviceTier === undefined ? undefined : params.serviceTier;
     return {
-      cwd: workspace(params.cwd ?? current.cwd),
+      cwd: workspace(params.cwd ?? current.cwd, this.config.accessMode),
       readOnly: ["readOnly", "read-only", ":read-only"].includes(params.sandboxPolicy?.type ?? params.sandbox ?? params.permissions)
-        ? true : ["workspaceWrite", "workspace-write", ":workspace"].includes(params.sandboxPolicy?.type ?? params.sandbox ?? params.permissions)
+        ? true : ["workspaceWrite", "workspace-write", ":workspace", "dangerFullAccess", "danger-full-access", ":danger-full-access"].includes(params.sandboxPolicy?.type ?? params.sandbox ?? params.permissions)
           ? false : current.readOnly ?? false,
       model,
       effort: params.effort ?? params.collaborationMode?.settings?.reasoning_effort ?? current.effort,
       fast: tier === undefined ? current.fast : tier === "fast" || tier === "priority",
-      ...permissionSettings(params, current),
+      ...permissionSettings(params, current, this.config.accessMode === "personal"),
     };
   }
 

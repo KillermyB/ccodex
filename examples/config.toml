@@ -1,5 +1,7 @@
 # CCodex Secure
 # These settings never enable remote control, RPC capture or cross-provider titles.
 log_level = "warn"
+# The graphical installer selects personal; project retains the isolated mode.
+access_mode = "project"
 # Optional absolute path to your official Claude Code native executable:
 # claude_binary = "/opt/homebrew/bin/claude"

@@ -21,8 +21,9 @@ export function within(path: string, root: string): boolean {
   return child === "" || (child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child));
 }
 
-export function workspace(path: string): string {
+export function workspace(path: string, mode: "project" | "personal" = "project"): string {
   const root = canonical(path);
+  if (mode === "personal") { if (!lstatSync(root).isDirectory()) throw new Error("Choose an existing folder."); return root; }
   if (within(canonical(homedir()), root) || root.split(sep).some((part) => PROTECTED.test(part)) || !lstatSync(root).isDirectory()) {
     throw new Error("Choose a dedicated project folder, not your home or filesystem root.");
   }
@@ -32,9 +33,10 @@ export function workspace(path: string): string {
 const PROTECTED = /^(?:\.git|\.claude|\.codex|\.ccodex(?:-secure)?|\.ssh|\.aws|\.azure|\.gnupg|\.npmrc|\.netrc|\.env(?:\..*)?|.*\.(?:pem|key|p12|pfx)|credentials(?:\.json)?)$/iu;
 
 /** Tool-level policy is complemented by Seatbelt, which checks resolved kernel paths. */
-export function permittedPath(path: string, cwd: string): boolean {
+export function permittedPath(path: string, cwd: string, mode: "project" | "personal" = "project"): boolean {
   try {
-    const root = workspace(cwd);
+    const root = workspace(cwd, mode);
+    if (mode === "personal") { canonical(resolve(root, path)); return true; }
     const absolute = resolve(root, path);
     if (!within(absolute, root) || relative(root, absolute).split(sep).some((part) => PROTECTED.test(part))) return false;
     let cursor = absolute;
@@ -49,8 +51,14 @@ export function permittedPath(path: string, cwd: string): boolean {
   } catch { return false; }
 }
 
-export function toolDecision(name: string, input: Record<string, unknown>, cwd: string, readOnly: boolean): "deny" | "ask" | "pass" {
+export function toolDecision(name: string, input: Record<string, unknown>, cwd: string, readOnly: boolean, mode: "project" | "personal" = "project"): "deny" | "ask" | "pass" {
   if (name === "AskUserQuestion" || name === "TodoWrite" || name === "ExitPlanMode") return "pass";
+  if (mode === "personal") {
+    if (name === "mcp__artifacts__publish_html") return "pass";
+    if (["Bash", "TaskStop"].includes(name)) return readOnly ? "deny" : "ask";
+    if (["WebFetch", "WebSearch"].includes(name)) return "ask";
+    if (name === "TaskOutput") return "pass";
+  }
   if (name === "mcp__secure__shell") return input.dangerouslyDisableSandbox || readOnly ? "deny" : "ask";
   if (name === "Bash") return "deny";
   const read = ["Read", "Glob", "Grep"].includes(name);
@@ -58,7 +66,7 @@ export function toolDecision(name: string, input: Record<string, unknown>, cwd: 
   if (!read && !write) return "deny";
   if (write && readOnly) return "deny";
   const path = input.file_path ?? input.notebook_path ?? input.path ?? cwd;
-  if (typeof path !== "string" || !permittedPath(path, cwd)) return "deny";
+  if (typeof path !== "string" || !permittedPath(path, cwd, mode)) return "deny";
   return write ? "ask" : "pass";
 }
 
@@ -67,13 +75,13 @@ export function secureEnvironment(config: Config): Record<string, string> {
   mkdirSync(temporary, { recursive: true, mode: 0o700 });
   mkdirSync(config.claudeHome, { recursive: true, mode: 0o700 });
   return {
-    HOME: homedir(), PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    HOME: homedir(), PATH: config.accessMode === "personal" ? process.env.PATH ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" : "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     LANG: "en_US.UTF-8", TERM: "dumb", TMPDIR: temporary, CLAUDE_CODE_TMPDIR: temporary,
     CLAUDE_CONFIG_DIR: config.claudeHome, CLAUDE_SECURESTORAGE_CONFIG_DIR: config.claudeHome,
     CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
     DISABLE_TELEMETRY: "1", DISABLE_ERROR_REPORTING: "1", DISABLE_AUTOUPDATER: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-    CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1", CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1", CLAUDE_CODE_DISABLE_CRON: "1",
+    CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1", ...(config.accessMode === "personal" ? {} : { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" }), CLAUDE_CODE_DISABLE_CRON: "1",
     CLAUDE_CODE_ENTRYPOINT: "sdk-ts", CLAUDE_AGENT_SDK_VERSION: "0.3.296", CLAUDE_CODE_SDK_READS_SESSION_STATE: "1",
   };
 }
@@ -105,11 +113,12 @@ ${_secretRoots.map((root) => `(deny file-read* file-write* (require-all ${subpat
 }
 
 export function secureOptions(config: Config, cwd?: string, readOnly = true): Options {
-  const root = cwd ? workspace(cwd) : undefined;
+  const root = cwd ? workspace(cwd, config.accessMode) : undefined;
   const runtime = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
   const privatePaths = [config.claudeHome, config.dataDir];
   const protectedPaths = root ? [".git", ".claude", ".env", ".env.local", ".env.production"].map((p) => join(root, p)) : [];
   return {
+    ...(config.accessMode === "personal" ? { additionalDirectories: [homedir(), ...["/Volumes", "/Users/Shared"].filter(existsSync)] } : {}),
     settingSources: [], strictMcpConfig: true, mcpServers: {}, plugins: [], skills: [],
     settings: { syncClaudeAiSkills: false, syncClaudeAiPlugins: false },
     env: secureEnvironment(config),
@@ -117,6 +126,10 @@ export function secureOptions(config: Config, cwd?: string, readOnly = true): Op
     // The native Bash tool is disabled. Our host-side shell tool has its own non-networked Seatbelt process.
     sandbox: { enabled: false },
     spawnClaudeCodeProcess: (options) => {
+      if (config.accessMode === "personal") {
+        verifyEngine(config);
+        return spawn(options.command, options.args, { cwd: options.cwd, env: { ...secureEnvironment(config), HOME: options.env.HOME ?? homedir() }, signal: options.signal, stdio: ["pipe", "pipe", "pipe"] });
+      }
       if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) throw new Error("CCodex Secure requires macOS Seatbelt; refusing an unsandboxed launch.");
       verifyEngine(config);
       const binary = realpathSync(config.claudeBinary);

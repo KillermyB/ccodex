@@ -22,5 +22,5 @@ export async function authenticationStatus(config: Config): Promise<boolean> {
 }
 
 export async function assertAuthenticated(config: Config): Promise<void> {
-  if (!await authenticationStatus(config)) throw new Error("La connexion Claude n’est pas reconnue sous les protections macOS. Ouvre CCodex Secure, choisis Connecter Claude, puis Vérifier la connexion.");
+  if (!await authenticationStatus(config)) throw new Error("La connexion Claude n’est pas reconnue dans le mode actuel. Ouvre CCodex Secure, choisis Connecter Claude, puis Vérifier la connexion.");
 }

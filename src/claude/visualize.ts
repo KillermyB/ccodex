@@ -46,7 +46,7 @@ export function writeVisualizePlugin(directory: string, skillFile: string): void
  * every turn, and gives it to stock as a writable root).
  */
 export function visualizationFolder(threadId: string): string | undefined {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7/iu.test(threadId)) return undefined;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(threadId)) return undefined;
   const day = new Date(Number.parseInt(`${threadId.slice(0, 8)}${threadId.slice(9, 13)}`, 16)).toISOString().slice(0, 10);
   return join(codexHome(), "visualizations", ...day.split("-"), threadId);
 }

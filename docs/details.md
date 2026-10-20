@@ -1,57 +1,39 @@
-# CCodex Secure pour macOS
+# CCodex Personnel pour macOS
 
-Version locale 0.5.11-secure.3, dérivée de gkorepanov/ccodex au commit 479aa13d66c9b54685348d0f7b9bdc1c7445a7bf. Projet indépendant, sans affiliation ni validation par OpenAI ou Anthropic. La licence MIT d'origine est conservée.
+Version locale 0.6.0-personal.1, dérivée de gkorepanov/ccodex (base 479aa13d66c9b54685348d0f7b9bdc1c7445a7bf) puis des corrections locales secure.1 à secure.3. Projet indépendant, sans affiliation ni validation OpenAI ou Anthropic. Licence MIT conservée.
 
-Cette version permet de choisir Claude dans Codex, avec un moteur Claude Code installé séparément. Elle réduit plusieurs risques de la version originale. Elle reste expérimentale : une conversation authentifiée dans l'application n'a pas encore été validée.
+## Mode Mac personnel
 
-## Utilisation sur le Mac
+Ce mode utilise les outils natifs de Claude Code et les autorisations de ton compte macOS. Le moteur n'est plus enfermé dans un profil Seatbelt limité au projet. Il peut lire et rechercher des documents entre tes projets, utiliser Git, installer des dépendances, lancer des commandes avec réseau et démarrer des prévisualisations locales. Les dossiers accessibles sont ceux que macOS autorise au processus ; les permissions Documents, Bureau, accessibilité ou automatisation peuvent nécessiter ton intervention dans les réglages macOS.
 
-Le paquet comprend une application « CCodex Secure » qui propose de vérifier les prérequis, d'activer la passerelle, de connecter Claude ou de la désinstaller. Aucune commande n'est à saisir. L'application n'est pas notariée par Apple.
+En autorisations standard, les écritures et commandes demandent une approbation dans Codex. Le choix explicite Accès complet dans la conversation active le mode natif sans demandes d'approbation. Le choix Lecture seule ou Plan continue d'interdire les écritures et commandes via la politique des outils ; en mode personnel, ce contrôle est logiciel et ne constitue pas une isolation du système de fichiers par le noyau.
 
-Prérequis de cette construction : Mac Apple silicon, Node.js 22.13 à 26, Codex CLI officiel installé et Claude Code natif 2.1.304. Cette version de Claude a été observée sur le Mac pendant la validation. Les autres versions sont refusées jusqu'à validation explicite.
+Les fichiers personnels, y compris les fichiers de configuration contenant des secrets, peuvent devenir accessibles au moteur lorsque les permissions de la conversation le permettent. Les instructions et fichiers des projets restent des données à examiner, pas une autorisation de lancer des actions externes. La connexion Claude dédiée sous ~/.ccodex-secure/claude est conservée. Les clés, proxys et endpoints du processus parent ne sont pas automatiquement importés.
 
-Commencer par « Vérifier ». Fermer ensuite les conversations actives et quitter Codex avant « Installer ». L'activation modifie les fichiers de démarrage des shells, le lanceur ~/.local/bin/codex et CODEX_CLI_PATH au moyen d'un LaunchAgent dédié. L'application Codex signée reste intacte. Rouvrir Codex après l'activation.
+## Animations et interfaces directement dans Codex
 
-« Connecter Claude » utilise le parcours officiel de connexion dans le navigateur avec une configuration dédiée sous ~/.ccodex-secure/claude. La connexion Claude habituelle n'est pas importée. Commencer avec un projet de test sans données confidentielles. La vérification et l'installation ne lancent aucune requête à un modèle.
+Claude dispose de l'outil mcp__artifacts__publish_html : il enregistre un fragment HTML/CSS/JavaScript dans le dossier de visualisation de la conversation et renvoie la directive d'affichage inline. Il peut ainsi afficher un test d'animation ou une petite interface interactive dans son message, avec des contrôles comme lecture/pause ou vitesse. Exemple de demande : « Crée trois essais de transition et affiche le résultat ici avec un contrôle de vitesse. »
 
-## Protections appliquées
+Ces aperçus sont du contenu de réponse, y compris dans une conversation en lecture seule. Ils sont limités à 1 Mo et restent dans le bac à sable de visualisation de Codex : les requêtes API sont bloquées, et seules les ressources statiques des CDN autorisés par Codex peuvent se charger. Pour une application de projet complète, Claude peut lancer un serveur de développement via Bash et fournir son URL locale à ouvrir dans le navigateur intégré de Codex. L'ouverture automatique d'un panneau n'est pas ajoutée par cette passerelle.
 
-- Aucun relais natif tiers, dépendance Rust ou contrôle à distance.
-- Aucun titre automatique envoyé à GPT depuis un chat Claude. Les transferts de conversation entre fournisseurs sont refusés ; démarrer un nouveau chat pour changer de fournisseur.
-- Aucun agent de délégation Codex ou MCP utilisateur installé. Le seul outil de commandes Claude est fourni par le code local de cette version.
-- Le moteur Claude fonctionne dans un profil macOS Seatbelt. Ses outils de fichiers sont limités au projet, avec une politique supplémentaire avant chaque outil. Les commandes passent dans un processus séparé sans réseau, sans accès au trousseau, aux environnements des autres processus et aux identifiants du moteur.
-- Les écritures et commandes demandent une approbation. Full Access et les profils inconnus sont refusés. La lecture seule interdit les commandes et écritures et est conservée après réouverture.
-- Les configurations Claude utilisateur et projet, MCP externes et skills externes ne sont pas chargés. Les outils natifs Bash, WebFetch, WebSearch, Skill, Agent et Task sont désactivés. Les modules internes du moteur Anthropic restent sous sa responsabilité.
-- Les fichiers .env, clés privées et répertoires de configuration sensibles sont bloqués. Les liens symboliques et liens physiques sont refusés par le contrôle des chemins des outils.
-- L'environnement du moteur est reconstruit avec une liste explicite. Les clés, proxys et endpoints personnalisés du processus parent ne sont pas transmis. La télémétrie et les mises à jour automatiques Claude sont désactivées par configuration d'environnement.
-- L'exécutable Claude est identifié par une empreinte SHA-256 lors de l'installation et vérifié avant chaque lancement. Un changement de binaire impose une nouvelle vérification et installation.
-- Pas de capture RPC, ni de rétention portée à cent ans. La rétention Claude par défaut reste sous le contrôle du moteur ; aucune modification du réglage habituel n'est effectuée.
-- L'installation utilise les bibliothèques locales du paquet et leur manifeste d'empreintes. Aucun npx, téléchargement de moteur ou mise à jour du registre n'est exécuté par setup/update/uninstall.
+## Finder et computer use
 
-## Limites pratiques et risques restants
+Claude peut retrouver des fichiers avec ses outils natifs ou Spotlight, puis ouvrir ou révéler un document dans Finder avec les commandes macOS, selon les autorisations de la conversation. Il peut utiliser AppleScript lorsqu'une tâche le demande et que macOS autorise l'automatisation correspondante.
 
-Le moteur reçoit les messages et les fichiers autorisés pour les traiter chez Anthropic. Son trafic API HTTPS reste nécessaire. Les commandes, elles, ne peuvent pas contacter Internet ni un serveur local ; elles ne peuvent donc pas télécharger des paquets, lancer un serveur de prévisualisation ou utiliser un navigateur. Les dépendances d'un projet doivent être installées séparément par l'utilisateur. Les commandes sont arrêtées après 120 secondes et leur sortie est limitée à 1 Mo.
+Le computer use officiel avec vision de l'écran, clics et souris n'est pas disponible dans les sessions non interactives du CLI, comme celles utilisées par le SDK de cette passerelle. Il n'est pas présenté comme activé ici. Documentation officielle : https://code.claude.com/docs/en/computer-use
 
-Les fichiers du projet explicitement autorisés peuvent contenir des données confidentielles sous des noms ordinaires. Aucun détecteur de secrets ne peut garantir leur absence. Les fichiers de configuration protégés, opérations Git, connexions externes, subagents et certaines fonctions avancées du logiciel original sont volontairement indisponibles. Les images à envoyer doivent être placées dans le projet et faire au plus 20 Mo.
+## Utilisation
 
-Le moteur natif Anthropic et le moteur Codex officiel restent des dépendances de confiance. Leurs binaires n'ont pas été reconstruits ni audités intégralement. Le profil du moteur Claude autorise HTTPS et les services macOS nécessaires à son authentification ; le refus de réseau affiché pour le projet concerne ses commandes. Cette version n'apporte aucune garantie contre un autre programme ayant déjà les mêmes droits que l'utilisateur, ni contre toutes les attaques par concurrence sur les fichiers.
+Le paquet contient une application CCodex Personnel, avec Vérifier, Vérifier la connexion, Vérifier le réseau, Mode Mac personnel, Mode projet isolé, Installer, Connecter Claude et Désinstaller. L'installation graphique sélectionne le mode personnel. Sur une installation existante, le mode peut être changé sans supprimer les conversations ni refaire la connexion. Quitter complètement Codex et le rouvrir pour charger une nouvelle version ou un changement de mode.
 
-La version durcie a modifié des fonctions importantes du logiciel original. Elle ne doit pas être présentée comme certifiée ou entièrement sûre. Premier usage recommandé sur un projet jetable, avec contrôle des premières approbations et possibilité de désinstallation.
+Le mode projet isolé reste disponible : il conserve les restrictions des versions secure, avec commandes sans réseau, fichiers limités au projet et refus d'Accès complet. Le binaire natif Claude reste identifié par SHA-256 et doit correspondre à la version validée 2.1.304. Prérequis : Mac Apple silicon, Node.js 22.13 à 26 et Codex CLI officiel déjà installés.
 
-## Validation effectuée
+Le contrôle distant, le relais natif tiers, les transferts automatiques vers GPT, les captures RPC et les mises à jour du registre restent désactivés. Aucun hook, MCP ou plugin externe n'est chargé automatiquement. L'application est signée localement, sans notarisation Apple.
 
-Compilation TypeScript, tests des contrôles d'outils et de chemins, essais macOS réels sur fichiers factices, refus du réseau local, délai de commande, lecture seule persistante, changement de binaire refusé, tests de passerelle avec moteurs factices. L'installation, la désinstallation et le retour arrière après échec ont aussi été vérifiés dans un HOME temporaire avec launchctl simulé. Le moteur Claude Code 2.1.304 a réussi l'initialisation du SDK et du serveur local sécurisé avec une configuration temporaire sans compte et sans prompt.
+## Validation et développement
 
-Aucun échange avec un modèle authentifié, aucune modification d'un projet personnel et aucune activation de la passerelle dans l'environnement utilisateur n'ont été effectués pendant la préparation.
+Tests sur documents et moteurs factices : lecture et écriture entre projets, Git, accès à un serveur local, changements Standard/Accès complet/Lecture seule, persistance des permissions, génération de fragments et directives de visualisation, conservation des restrictions du mode projet et retour arrière d'installation. Initialisation du vrai SDK avec les outils natifs et le serveur d'aperçu dans un HOME temporaire sans compte ni prompt. Aucun document personnel n'a servi aux tests.
 
-## Développement
+Installer les bibliothèques avec npm ci --ignore-scripts --omit=optional ; lancer npm run check et npm test sur macOS. Les tests de sockets et Seatbelt nécessitent un environnement qui les autorise. Les anciens tests amont sont conservés comme références. Le script scripts/verify-packaged-installation.mjs vérifie l'installation du runtime avec launchctl simulé et un HOME temporaire. Les tests réseau natifs synthétiques sont séparés pour ne pas imposer Internet à la suite locale.
 
-Installer les dépendances avec `npm ci --ignore-scripts --omit=optional`, puis utiliser `npm run check` et `npm test` sur macOS. Les anciens tests de fonctionnalités amont restent comme références mais ne font pas partie du contrat de cette version ; plusieurs fonctions ont été retirées. Les nouveaux tests sont dans tests/security. Les tests nécessitent l'accès normal à Seatbelt et aux sockets locaux ; un bac à sable englobant peut empêcher leur exécution.
-
-Ne pas publier le paquet sous le nom npm de l'auteur original. package.json est privé et les workflows de publication ont été retirés.
-
-Le script scripts/verify-packaged-installation.mjs permet de répéter le test du paquet avec Node et l’option --experimental-test-module-mocks, en lui donnant le chemin absolu du runtime. Il remplace launchctl en mémoire et refuse toute utilisation du HOME réel.
-
-Correctif secure.2 : lecture du seul fichier du trousseau de session sélectionné par macOS pour le moteur officiel, afin de retrouver la connexion Claude dédiée. Le dossier complet des trousseaux et ses fichiers voisins ne sont pas ajoutés au profil. Les commandes de projet ne reçoivent pas cette exception et restent sans réseau ni trousseau. Le moteur natif reste une dépendance de confiance : le fichier du trousseau peut contenir d’autres entrées chiffrées ; cette permission système n’est pas un filtrage par entrée. Une vérification de connexion sous isolation est maintenant proposée dans l’application et exécutée après une connexion réussie. Aucun jeton n’est affiché par cette vérification.
-
-Correctif secure.3 : le moteur peut joindre uniquement le socket DNS système /private/var/run/mDNSResponder et lire /private/var/run/resolv.conf. Le certificat public /etc/ssl/cert.pem (et son chemin canonique /private/etc/ssl/cert.pem) est exclu de la règle générale bloquant les fichiers PEM. Les certificats TLS restent vérifiés. Aucune ouverture générale de UDP/TCP 53 ou du dossier /private/var/run n’est ajoutée. Les commandes de projet restent sans réseau. Le bouton Vérifier le réseau teste un HEAD HTTPS sans compte, sans redirection et sans configuration curl utilisateur. Le moteur natif a aussi été testé dans un HOME et projet temporaires avec une clé synthétique invalide : refus d’authentification attendu, sans erreur DNS ou TLS et sans génération facturée.
+Cette version reste expérimentale. L'échange authentifié complet, les permissions macOS d'automatisation et le rendu depuis une réponse générée par Claude restent à confirmer en usage réel. Le moteur officiel, Node et l'application Codex restent des dépendances de confiance. Le mode personnel offre volontairement des droits plus larges que le mode projet isolé.

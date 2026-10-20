@@ -1,3 +1,4 @@
+import { parse, stringify } from "smol-toml";
 import { verifyNetwork } from "../security/network.js";
 import { assertAuthenticated } from "../security/authentication.js";
 import { verifyBundle } from "../security/bundle.js";
@@ -12,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { secureEnvironment } from "../security/policy.js";
 import { promisify } from "node:util";
 import { delegate } from "../cli/delegate.js";
-import { claudeHome, defaultConfigToml, displacedCodexPath, findInstalledCodex, isCcodex, productHome, remoteCodexPath, type Config, loadConfig } from "../config.js";
+import { claudeHome, defaultConfigToml, displacedCodexPath, findInstalledCodex, isCcodex, expandHome, productHome, remoteCodexPath, type Config, loadConfig } from "../config.js";
 import { probeAppServer } from "../daemon/probe.js";
 import { reconcileManagedProcess, stopManagedProcess } from "../daemon/supervisor.js";
 import { reconcileOwnedGateway, stopSocketOwner } from "../daemon/ownership.js";
@@ -317,8 +318,17 @@ export async function doctor(config: Config, json: boolean): Promise<number> {
 
 export async function runManagementCommand(args: readonly string[], config: () => Config): Promise<number | undefined> {
   switch (args[0]) {
+    case "access": {
+      const mode = args[1];
+      if (mode !== "project" && mode !== "personal") throw new Error("Usage: ccodex access personal|project");
+      const path = expandHome(process.env.CCODEX_CONFIG ?? join(productHome(), "config.toml"));
+      const existing = existsSync(path) ? parse(readFileSync(path, "utf8")) : {};
+      atomicWrite(path, stringify({ ...existing, access_mode: mode }), existsSync(path) ? statSync(path).mode & 0o777 : 0o600);
+      process.stdout.write(`Mode ${mode === "personal" ? "Mac personnel" : "projet isolé"} sélectionné. Quitte et rouvre Codex pour l’appliquer.\n`);
+      return 0;
+    }
     case "secure-network-check": { const status = await verifyNetwork(config()); process.stdout.write(`DNS et HTTPS disponibles pour api.anthropic.com (HTTP ${status}). Aucun compte utilisé.\n`); return 0; }
-    case "secure-auth-check": await assertAuthenticated(config()); process.stdout.write("Connexion Claude reconnue sous les protections macOS.\n"); return 0;
+    case "secure-auth-check": await assertAuthenticated(config()); process.stdout.write("Connexion Claude reconnue dans le mode configuré.\n"); return 0;
     case "secure-check": process.stdout.write(`${await selfCheck(config())}\n`); return 0;
     case "setup": return setup(args.slice(1));
     case "update": return update(args.slice(1));
@@ -331,7 +341,7 @@ export async function runManagementCommand(args: readonly string[], config: () =
         const code = await delegate(c.claudeBinary, ["auth", "login"], secureEnvironment(c));
         if (code !== 0) return code;
         await assertAuthenticated(c);
-        process.stdout.write("Connexion Claude vérifiée sous les protections macOS.\n");
+        process.stdout.write("Connexion Claude vérifiée dans le mode configuré.\n");
         return 0;
       }
       throw new Error("Usage: ccodex auth codex|claude");

@@ -1,12 +1,12 @@
 {
   "name": "@gkorepanov/ccodex",
-  "version": "0.5.11-secure.3",
+  "version": "0.6.0-personal.1",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "@gkorepanov/ccodex",
-      "version": "0.5.11-secure.3",
+      "version": "0.6.0-personal.1",
       "license": "MIT",
       "dependencies": {
         "@anthropic-ai/claude-agent-sdk": "0.3.296",

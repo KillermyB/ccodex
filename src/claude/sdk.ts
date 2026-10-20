@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { query, type ModelInfo, type Options, type PermissionMode, type Query, type SDKUserMessage, type SlashCommand } from "@anthropic-ai/claude-agent-sdk";
@@ -23,14 +24,16 @@ export interface CodexPermissions {
 }
 
 /** Codex permission fields (thread/start, turn/start, settings/update) → Claude permission mode; undefined = none sent. */
-function chosenPermissionMode(params: JsonObject, current: PermissionMode): PermissionMode | undefined {
+function chosenPermissionMode(params: JsonObject, current: PermissionMode, personal = false): PermissionMode | undefined {
   const sandbox = params.sandboxPolicy?.type ?? params.sandbox ?? params.permissions;
   if (sandbox != null && !["readOnly", "read-only", ":read-only", "workspaceWrite", "workspace-write", ":workspace", ":workspace-write", "dangerFullAccess", "danger-full-access", ":danger-full-access"].includes(sandbox)) {
     throw new Error("Unsupported permission profile: refusing to widen its scope.");
   }
   if (["dangerFullAccess", "danger-full-access", ":danger-full-access"].includes(sandbox)) {
+    if (personal) return "bypassPermissions";
     throw new Error("CCodex Secure refuses Full Access. Choose the workspace permission profile.");
   }
+  if (personal && sandbox == null && params.approvalPolicy == null && params.approvalsReviewer == null) return current;
   // Auto-review and imported permissive modes never grant authority in this fork.
   if (params.approvalPolicy === "never") return "dontAsk";
   return "default";
@@ -40,10 +43,10 @@ function chosenPermissionMode(params: JsonObject, current: PermissionMode): Perm
  * The chat's permissions and plan mode after a Codex settings change, apart like stock's: the permission mode changes
  * only with the permission fields Desktop sends (null to keep them), plan mode with the collaboration mode.
  */
-export function permissionSettings(params: JsonObject, current: Pick<SessionSettings, "permissionMode" | "plan">): Pick<SessionSettings, "permissionMode" | "plan"> {
+export function permissionSettings(params: JsonObject, current: Pick<SessionSettings, "permissionMode" | "plan">, personal = false): Pick<SessionSettings, "permissionMode" | "plan"> {
   const collaboration = params.collaborationMode?.mode;
   return {
-    permissionMode: chosenPermissionMode(params, current.permissionMode) ?? current.permissionMode,
+    permissionMode: chosenPermissionMode(params, current.permissionMode, personal) ?? current.permissionMode,
     plan: collaboration ? collaboration === "plan" : current.plan,
   };
 }
@@ -53,9 +56,10 @@ export function claudeMode(settings: Pick<SessionSettings, "permissionMode" | "p
   return settings.plan ? "plan" : settings.permissionMode;
 }
 
-export function codexPermissions(mode: string | null, cwd: string): CodexPermissions {
+export function codexPermissions(mode: string | null, cwd: string, personal = false): CodexPermissions {
+  if (personal && mode === "bypassPermissions") return { approvalPolicy: "never", approvalsReviewer: "user", sandboxPolicy: { type: "dangerFullAccess" }, activePermissionProfile: { id: ":danger-full-access", extends: null } };
   const sandboxPolicy = {
-    type: "workspaceWrite", writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false,
+    type: "workspaceWrite", writableRoots: personal ? [...new Set([cwd, homedir()])] : [cwd], networkAccess: personal, excludeTmpdirEnvVar: false, excludeSlashTmp: false,
   };
   const profile = { id: ":workspace", extends: null };
   if (mode === "dontAsk") return { approvalPolicy: "never", approvalsReviewer: "user", sandboxPolicy, activePermissionProfile: profile };

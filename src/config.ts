@@ -5,6 +5,8 @@ import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { parse } from "smol-toml";
 
 export interface Config {
+  /** Personal mode uses normal native Claude file and shell access. Omitted means project isolation. */
+  readonly accessMode?: "project" | "personal";
   /** The codex installed on the machine (PATH, skipping our shims), or `codex_binary`. */
   readonly codex: string;
   readonly claudeBinary: string;
@@ -132,6 +134,7 @@ export function loadConfig(): Config {
   const renamePrompt = undefined;
   return {
     codex,
+    accessMode: file.access_mode === "personal" ? "personal" : "project",
     claudeBinary: resolve(expandHome(process.env.CCODEX_CLAUDE_BINARY ?? file.claude_binary ?? bundledClaudeExecutable())),
     claudeHome: claudeHome(),
     productHome: home,

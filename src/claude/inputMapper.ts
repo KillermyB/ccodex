@@ -17,7 +17,7 @@ const mediaTypes: Record<string, string> = {
 const dataImageUrl = /^data:(image\/[a-z+.-]+);base64,([\s\S]*)$/i;
 
 /** Codex user input → Claude message content (string when it is text only, so slash commands work). */
-export async function claudeContent(input: readonly UserInput[], cwd: string): Promise<string | Record<string, unknown>[]> {
+export async function claudeContent(input: readonly UserInput[], cwd: string, mode: "project" | "personal" = "project"): Promise<string | Record<string, unknown>[]> {
   const content: Record<string, unknown>[] = [];
   for (const item of input) {
     if (item.type === "text") content.push({ type: "text", text: decodeClaudeSkillChips(item.text) });
@@ -30,7 +30,7 @@ export async function claudeContent(input: readonly UserInput[], cwd: string): P
         : { type: "image", source: { type: "url", url: item.url } });
     } else if (item.type === "localImage") {
       const path = isAbsolute(item.path) ? item.path : resolve(cwd, item.path);
-      if (!permittedPath(path, cwd)) throw invalidParams("Copy attachments into the authorized project folder first.");
+      if (!permittedPath(path, cwd, mode)) throw invalidParams("Copy attachments into the authorized project folder first.");
       if ((await stat(path)).size > 20 * 1024 * 1024) throw invalidParams("Image exceeds the 20 MB limit.");
       const mediaType = mediaTypes[extname(path).toLowerCase()];
       if (!mediaType) throw invalidParams(`Unsupported image type for '${item.path}'.`);
