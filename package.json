@@ -1,6 +1,6 @@
 {
   "name": "@gkorepanov/ccodex",
-  "version": "0.5.11-secure.1",
+  "version": "0.5.11-secure.2",
   "description": "Local hardened macOS fork of ccodex; no remote relay or automatic provider delegation.",
   "homepage": "https://github.com/gkorepanov/ccodex#readme",
   "repository": {

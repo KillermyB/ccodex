@@ -1,4 +1,5 @@
 import { verifyEngine } from "./engine.js";
+import { authenticationKeychain } from "./keychain.js";
 import { spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -81,7 +82,7 @@ const quote = (value: string) => JSON.stringify(value);
 const subpath = (path: string) => `(subpath ${quote(canonical(path))})`;
 
 /** Outer boundary for the native Claude process, including its direct file tools. */
-export function seatbeltProfile(readRoots: readonly string[], writeRoots: readonly string[], protectedRoots: readonly string[], _secretRoots: readonly string[] = [], network = true, keychain = true): string {
+export function seatbeltProfile(readRoots: readonly string[], writeRoots: readonly string[], protectedRoots: readonly string[], _secretRoots: readonly string[] = [], network = true, keychain = true, authenticationFiles: readonly string[] = []): string {
   // Character classes avoid ambiguity in SBPL regex escaping. Applied to all aliases of a path.
   const secretRules = `(deny file-read* file-write* (regex #"/([.]git|[.]claude|[.]codex|[.]ccodex|credentials([.]json)?|[.]ssh|[.]aws|[.]azure|[.]gnupg|[.]npmrc|[.]netrc|[.]env([.][^/]*)?|[^/]+[.](pem|key|p12|pfx))(/|$)"))`;
   return `(version 1)
@@ -96,7 +97,7 @@ ${keychain ? "(allow process-info*)" : ""}
 (allow file-write* (literal "/dev/null") (literal "/dev/tty") ${writeRoots.map(subpath).join(" ")})
 ${protectedRoots.length ? `(deny file-write* ${protectedRoots.map(subpath).join(" ")})` : ""}
 ${network ? `(allow network-outbound (remote tcp "*:443"))` : `(deny network*)`}
-${keychain ? "" : "(deny mach-lookup)"}
+${keychain ? authenticationFiles.length ? `(allow file-read-data ${authenticationFiles.map((path) => `(literal ${quote(canonical(path))})`).join(" ")})` : "" : "(deny mach-lookup)"}
 ${secretRules}
 ${_secretRoots.map((root) => `(deny file-read* file-write* (require-all ${subpath(root)} (regex #"/[.]ccodex-secure(/|$)")))`).join("\n")}
 `;
@@ -119,7 +120,7 @@ export function secureOptions(config: Config, cwd?: string, readOnly = true): Op
       verifyEngine(config);
       const binary = realpathSync(config.claudeBinary);
       const readRoots = [runtime, binary, ...privatePaths, ...(root ? [root] : [])];
-      const profile = seatbeltProfile(readRoots, [...privatePaths, ...(root && !readOnly ? [root] : [])], protectedPaths, root ? [root] : []);
+      const profile = seatbeltProfile(readRoots, [...privatePaths, ...(root && !readOnly ? [root] : [])], protectedPaths, root ? [root] : [], true, true, authenticationKeychain(options.env.HOME ?? homedir()));
       return spawn("/usr/bin/sandbox-exec", ["-p", profile, options.command, ...options.args], {
         cwd: options.cwd, env: { ...secureEnvironment(config), HOME: options.env.HOME ?? homedir() }, signal: options.signal, stdio: ["pipe", "pipe", "pipe"],
       });

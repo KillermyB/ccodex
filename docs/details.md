@@ -1,6 +1,6 @@
 # CCodex Secure pour macOS
 
-Version locale 0.5.11-secure.1, dérivée de gkorepanov/ccodex au commit 479aa13d66c9b54685348d0f7b9bdc1c7445a7bf. Projet indépendant, sans affiliation ni validation par OpenAI ou Anthropic. La licence MIT d'origine est conservée.
+Version locale 0.5.11-secure.2, dérivée de gkorepanov/ccodex au commit 479aa13d66c9b54685348d0f7b9bdc1c7445a7bf. Projet indépendant, sans affiliation ni validation par OpenAI ou Anthropic. La licence MIT d'origine est conservée.
 
 Cette version permet de choisir Claude dans Codex, avec un moteur Claude Code installé séparément. Elle réduit plusieurs risques de la version originale. Elle reste expérimentale : une conversation authentifiée dans l'application n'a pas encore été validée.
 
@@ -51,3 +51,5 @@ Installer les dépendances avec `npm ci --ignore-scripts --omit=optional`, puis 
 Ne pas publier le paquet sous le nom npm de l'auteur original. package.json est privé et les workflows de publication ont été retirés.
 
 Le script scripts/verify-packaged-installation.mjs permet de répéter le test du paquet avec Node et l’option --experimental-test-module-mocks, en lui donnant le chemin absolu du runtime. Il remplace launchctl en mémoire et refuse toute utilisation du HOME réel.
+
+Correctif secure.2 : lecture du seul fichier du trousseau de session sélectionné par macOS pour le moteur officiel, afin de retrouver la connexion Claude dédiée. Le dossier complet des trousseaux et ses fichiers voisins ne sont pas ajoutés au profil. Les commandes de projet ne reçoivent pas cette exception et restent sans réseau ni trousseau. Le moteur natif reste une dépendance de confiance : le fichier du trousseau peut contenir d’autres entrées chiffrées ; cette permission système n’est pas un filtrage par entrée. Une vérification de connexion sous isolation est maintenant proposée dans l’application et exécutée après une connexion réussie. Aucun jeton n’est affiché par cette vérification.

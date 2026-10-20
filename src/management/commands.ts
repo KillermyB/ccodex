@@ -1,3 +1,4 @@
+import { assertAuthenticated } from "../security/authentication.js";
 import { verifyBundle } from "../security/bundle.js";
 import { pinEngine, verifyEngine } from "../security/engine.js";
 import { selfCheck } from "../security/selfcheck.js";
@@ -315,6 +316,7 @@ export async function doctor(config: Config, json: boolean): Promise<number> {
 
 export async function runManagementCommand(args: readonly string[], config: () => Config): Promise<number | undefined> {
   switch (args[0]) {
+    case "secure-auth-check": await assertAuthenticated(config()); process.stdout.write("Connexion Claude reconnue sous les protections macOS.\n"); return 0;
     case "secure-check": process.stdout.write(`${await selfCheck(config())}\n`); return 0;
     case "setup": return setup(args.slice(1));
     case "update": return update(args.slice(1));
@@ -322,7 +324,14 @@ export async function runManagementCommand(args: readonly string[], config: () =
     case "doctor": return doctor(config(), args.includes("--json"));
     case "auth":
       if (args[1] === "codex") return delegate(config().codex, ["login"]);
-      if (args[1] === "claude") { const c = config(); verifyEngine(c); return delegate(c.claudeBinary, ["auth", "login"], secureEnvironment(c)); }
+      if (args[1] === "claude") {
+        const c = config(); verifyEngine(c);
+        const code = await delegate(c.claudeBinary, ["auth", "login"], secureEnvironment(c));
+        if (code !== 0) return code;
+        await assertAuthenticated(c);
+        process.stdout.write("Connexion Claude vérifiée sous les protections macOS.\n");
+        return 0;
+      }
       throw new Error("Usage: ccodex auth codex|claude");
     default: return undefined;
   }

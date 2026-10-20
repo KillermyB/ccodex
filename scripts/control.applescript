@@ -7,13 +7,16 @@ on run
     return
   end try
   set commandBase to "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin " & quoted form of nodePath & " " & quoted form of (runtimeFolder & "/dist/cli/main.js")
-  set actionChoice to choose from list {"Vérifier", "Installer", "Connecter Claude", "Désinstaller", "Lire les limites"} with title "CCodex Secure" with prompt "Version locale expérimentale. Choisis d’abord Vérifier. Les commandes de l’IA restent sans réseau." default items {"Vérifier"} OK button name "Continuer" cancel button name "Fermer"
+  set actionChoice to choose from list {"Vérifier", "Vérifier la connexion", "Installer", "Connecter Claude", "Désinstaller", "Lire les limites"} with title "CCodex Secure" with prompt "Version locale expérimentale. Choisis d’abord Vérifier. Les commandes de l’IA restent sans réseau." default items {"Vérifier"} OK button name "Continuer" cancel button name "Fermer"
   if actionChoice is false then return
   set chosenAction to item 1 of actionChoice
   try
     if chosenAction is "Vérifier" then
       set resultText to do shell script (commandBase & " secure-check")
       display dialog "Le moteur et les restrictions macOS ont passé la vérification locale. Aucun compte ni message IA n’a été utilisé.\n\nClaude Code requis : 2.1.304. Une conversation authentifiée dans Codex reste à vérifier." buttons {"Fermer"} with title "CCodex Secure"
+    else if chosenAction is "Vérifier la connexion" then
+      do shell script (commandBase & " secure-auth-check")
+      display dialog "La connexion Claude est reconnue sous les protections macOS. Aucun message n’a été envoyé à un modèle." buttons {"Fermer"} with title "CCodex Secure"
     else if chosenAction is "Installer" then
       display dialog "Ferme tes conversations actives et quitte Codex avant de continuer.\n\nL’activation ajoute un lanceur local et une configuration de démarrage réversible. L’application Codex signée reste intacte. Aucune connexion à tes comptes n’est effectuée.\n\nLes commandes IA ne pourront pas télécharger de dépendances ni démarrer une prévisualisation réseau." buttons {"Annuler", "Installer"} default button "Installer" cancel button "Annuler" with title "Activer CCodex Secure"
       do shell script (commandBase & " setup")
@@ -23,7 +26,7 @@ on run
       with timeout of 600 seconds
         do shell script (commandBase & " auth claude")
       end timeout
-      display dialog "La commande de connexion s’est terminée. Rouvre Codex et vérifie un premier échange dans un projet de test." buttons {"Fermer"} with title "CCodex Secure"
+      display dialog "La connexion Claude a été vérifiée sous les protections macOS. Rouvre Codex et vérifie un premier échange dans un projet de test." buttons {"Fermer"} with title "CCodex Secure"
     else if chosenAction is "Désinstaller" then
       display dialog "Quitte Codex avant de continuer. Les lanceurs et réglages de démarrage gérés seront retirés. Les conversations et la connexion Claude dédiées seront conservées dans ~/.ccodex-secure." buttons {"Annuler", "Désinstaller"} default button "Désinstaller" cancel button "Annuler" with title "Retirer CCodex Secure"
       do shell script (commandBase & " uninstall")

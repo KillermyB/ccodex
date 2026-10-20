@@ -1,4 +1,4 @@
-CCodex Secure 0.5.11-secure.1
+CCodex Secure 0.5.11-secure.2
 Base: gkorepanov/ccodex 479aa13d66c9b54685348d0f7b9bdc1c7445a7bf
 
 Suppression du relais natif, de la chaîne Rust, du contrôle distant et de la délégation GPT.
@@ -8,3 +8,5 @@ Environnement et état Claude dédiés ; pas de capture RPC ou rétention forcé
 Installation locale, manifeste SHA-256, dépendances figées et moteur natif épinglé.
 
 La version est expérimentale. Le démarrage sans compte est validé ; l'usage authentifié dans Codex reste à vérifier avec l'utilisateur. Voir README.md pour les limites.
+
+Correctif secure.2 : lecture du seul fichier du trousseau de session sélectionné par macOS pour le moteur officiel, afin de retrouver la connexion Claude dédiée. Le dossier complet des trousseaux et ses fichiers voisins ne sont pas ajoutés au profil. Les commandes de projet ne reçoivent pas cette exception et restent sans réseau ni trousseau. Le moteur natif reste une dépendance de confiance : le fichier du trousseau peut contenir d’autres entrées chiffrées ; cette permission système n’est pas un filtrage par entrée. Une vérification de connexion sous isolation est maintenant proposée dans l’application et exécutée après une connexion réussie. Aucun jeton n’est affiché par cette vérification.
