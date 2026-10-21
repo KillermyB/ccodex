@@ -4,6 +4,24 @@ import {secureOptions,toolDecision,workspace,permittedPath} from '../../dist/sec
 import {pinEngine} from '../../dist/security/engine.js';import {permissionSettings,codexPermissions} from '../../dist/claude/sdk.js';
 import {runManagementCommand} from '../../dist/management/commands.js';
 
+test('personal launch keeps native environment while preserving the dedicated keychain account fallback',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'ccodex-personal-auth-env-'));
+ const beforeUser=process.env.USER,beforeCustom=process.env.CCODEX_TEST_NATIVE_SETTING;
+ process.env.USER='synthetic-other-account';process.env.CCODEX_TEST_NATIVE_SETTING='native-setting';
+ try{
+  const config={accessMode:'personal',productHome:root,claudeHome:join(root,'claude'),dataDir:join(root,'state'),claudeBinary:process.execPath};
+  const options=secureOptions(config);
+  const child=options.spawnClaudeCodeProcess({command:process.execPath,args:['-e','console.log(JSON.stringify({user:process.env.USER??null,custom:process.env.CCODEX_TEST_NATIVE_SETTING,home:process.env.CLAUDE_CONFIG_DIR}))'],cwd:root,env:options.env,signal:new AbortController().signal});
+  let output='';child.stdout.on('data',b=>output+=b);child.stderr.resume();
+  assert.equal(await new Promise(r=>child.once('close',r)),0);
+  assert.deepEqual(JSON.parse(output),{user:null,custom:'native-setting',home:config.claudeHome});
+ }finally{
+  if(beforeUser===undefined)delete process.env.USER;else process.env.USER=beforeUser;
+  if(beforeCustom===undefined)delete process.env.CCODEX_TEST_NATIVE_SETTING;else process.env.CCODEX_TEST_NATIVE_SETTING=beforeCustom;
+  rmSync(root,{recursive:true,force:true});
+ }
+});
+
 test('personal mode permits cross-project paths and keeps normal write/command approvals',()=>{
  const root=mkdtempSync(join(tmpdir(),'ccodex-personal-policy-'));const project=join(root,'project');mkdirSync(project);const sibling=join(root,'other-project.txt');writeFileSync(sibling,'synthetic');
  try{

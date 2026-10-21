@@ -1,4 +1,5 @@
-CCodex Personnel 0.7.0-personal.1
+CCodex Personnel 0.7.0-personal.2
+Connexion dédiée : conserve la recherche du compte dans le trousseau utilisée lors de la connexion initiale, même si USER est hérité. Aucun identifiant copié ni modifié.
 Base : gkorepanov/ccodex 479aa13d66c9b54685348d0f7b9bdc1c7445a7bf
 
 Fonctions rétablies en mode personnel : accès et appairage à distance, sous-agents, skills, plugins, hooks, MCP externes, délégation Codex, changement de fournisseur, titres GPT, captures RPC et mises à jour du fork.

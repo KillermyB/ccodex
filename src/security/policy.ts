@@ -79,6 +79,9 @@ export function secureEnvironment(config: Config): Record<string, string> {
       CLAUDE_SECURESTORAGE_CONFIG_DIR: config.claudeHome, CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
       CLAUDE_CODE_ENTRYPOINT: "claude-desktop" } as Record<string, string>;
     delete env.CCODEX_SHIM_ACTIVE; delete env.CODEX_CLI_PATH;
+    // Preserve the native keychain account fallback used when this dedicated
+    // Claude home was authenticated. Inheriting USER selects a different item.
+    delete env.USER;
     return env;
   }
   return {

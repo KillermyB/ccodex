@@ -2,7 +2,7 @@
 
 Claude dans l’interface Codex, avec outils natifs, extensions, accès à distance et aperçus interactifs.
 
-**Version : `0.7.0-personal.1` · macOS Apple silicon · Expérimental.**
+**Version : `0.7.0-personal.2` · macOS Apple silicon · Expérimental.**
 
 Fork de [gkorepanov/ccodex](https://github.com/gkorepanov/ccodex), créé par George Korepanov, basé sur [`479aa13`](https://github.com/gkorepanov/ccodex/commit/479aa13d66c9b54685348d0f7b9bdc1c7445a7bf). Licence [MIT](LICENSE) conservée. Projet indépendant d’OpenAI et d’Anthropic.
 
