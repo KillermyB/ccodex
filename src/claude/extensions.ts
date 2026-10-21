@@ -38,6 +38,7 @@ export function activateNativeExtensions(config: Config, agent: string): void {
   const wrapper = join(config.claudeHome, "agents", "codex-wrapper.md");
   if (!existsSync(wrapper)) atomicWrite(wrapper, agent, 0o600);
   const path = join(config.claudeHome, "settings.json");
-  const settings = { ...object(join(user, "settings.json")), ...object(path), syncClaudeAiSkills: true, syncClaudeAiPlugins: true };
+  // User settings are merged in memory by nativeExtensions; do not duplicate their keys/env on disk.
+  const settings = { ...object(path), syncClaudeAiSkills: true, syncClaudeAiPlugins: true };
   atomicWrite(path, JSON.stringify(settings, null, 2) + "\n", 0o600);
 }
