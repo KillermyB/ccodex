@@ -1,6 +1,6 @@
 {
   "name": "@gkorepanov/ccodex",
-  "version": "0.6.0-personal.1",
+  "version": "0.7.0-personal.1",
   "description": "Unofficial macOS fork of ccodex with personal/project modes, native Claude tools and inline animation previews.",
   "homepage": "https://github.com/KillermyB/ccodex#readme",
   "repository": {
@@ -47,7 +47,11 @@
     "test:unit": "vitest run --config config/vitest.config.ts",
     "test:watch": "vitest --config config/vitest.config.ts",
     "test:security": "npm run build:tests && node --experimental-test-module-mocks --test tests/security/*.test.mjs",
-    "build:tests": "tsc tests/fixtures/fakeClaude.ts --outDir test-generated --target ES2023 --module ESNext --moduleResolution Bundler --skipLibCheck"
+    "build:tests": "tsc tests/fixtures/fakeClaude.ts --outDir test-generated --target ES2023 --module ESNext --moduleResolution Bundler --skipLibCheck",
+    "build:relay": "sh scripts/build-relay.sh",
+    "build:relay:linux": "sh scripts/build-linux-relay.sh",
+    "sync:relay-transport": "node scripts/relay-transport.mjs",
+    "check:relay-transport": "node scripts/relay-transport.mjs --check"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.296",

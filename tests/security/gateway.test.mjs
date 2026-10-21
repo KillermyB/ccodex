@@ -32,7 +32,7 @@ test('gateway routes both providers, blocks implicit transfers and exposes restr
   const guard=options.hooks.PreToolUse[0].hooks[0];const result=await guard({tool_name:'Write',tool_input:{file_path:join(project,'file.txt')}});assert.equal(result.hookSpecificOutput.permissionDecision,'deny');
   const count=fakeClaude.prompts.length;await request('turn/start',{threadId,turnTrigger:'thread_title',input:[{type:'text',text:'private title text',text_elements:[]}]});assert.equal(fakeClaude.prompts.length,count);
   await assert.rejects(()=>request('thread/settings/update',{threadId,model:'gpt-6-luna'}),/blocks provider transfers/);
-  await assert.rejects(()=>request('remoteControl/enable'),/disabled/);
+  await assert.rejects(()=>request('remoteControl/pairing/start'),/requires remote control/);
   await assert.rejects(()=>request('thread/settings/update',{threadId,sandbox:'danger-full-access'}),/refuses Full Access/);
  }finally{ws.close();await server.stop();rmSync(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});}
 });

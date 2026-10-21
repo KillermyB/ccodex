@@ -1,12 +1,9 @@
-CCodex Personnel 0.6.0-personal.1
-Base amont : gkorepanov/ccodex 479aa13d66c9b54685348d0f7b9bdc1c7445a7bf
-Précédent local : secure.3, 0f77ceef7fab8f1dad0b48b7089643f73b19ff08
+CCodex Personnel 0.7.0-personal.1
+Base : gkorepanov/ccodex 479aa13d66c9b54685348d0f7b9bdc1c7445a7bf
 
-Ajout d'un mode personnel natif : fichiers entre projets, Bash, réseau, Git et serveurs de prévisualisation.
-Autorisations standard avec demandes ; Accès complet uniquement si sélectionné dans la conversation.
-Lecture seule/Plan contrôlés par les outils, sans promesse d'isolation noyau en mode personnel.
-Ajout d'un outil de publication HTML inline dans le dossier de visualisation de la conversation.
-Mode projet isolé conservé et sélection réversible depuis l'application.
-Le computer use officiel interactif n'est pas disponible dans ce mode SDK.
-La connexion dédiée, l'intégrité du moteur, l'absence de relais distant et les mises à jour locales sont conservées.
-Voir README.md et les résultats de validation pour les limites.
+Fonctions rétablies en mode personnel : accès et appairage à distance, sous-agents, skills, plugins, hooks, MCP externes, délégation Codex, changement de fournisseur, titres GPT, captures RPC et mises à jour du fork.
+Les permissions natives et les réglages macOS s’appliquent. Le mode projet isolé reste disponible.
+Le moteur Claude du mode personnel suit son installation native ; il n’est plus bloqué par l’empreinte d’une ancienne version.
+Le relais distant est le binaire amont 0.5.11, figé et vérifié ; sa reconstruction indépendante et la correction de ses dépendances Rust ne sont pas réalisées ici.
+Les mises à jour utilisent les releases KillermyB/ccodex, vérifient la somme de l’archive et le manifeste de tous les fichiers, et refusent les liens et traversées de chemins à l’extraction.
+Le contrôle visuel écran/souris n’est pas intégré au SDK.

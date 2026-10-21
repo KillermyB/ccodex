@@ -59,6 +59,7 @@ const MAX_PROCESSES = Number(process.env.CCODEX_E2E_MAX_PROCESSES) || 10;
 
 /** A chat's permissions and plan mode from the mode its transcript last recorded (in plan mode, meta.json keeps its own). */
 function recordedPermissions(threadId: string, recorded: string | null | undefined, meta: Meta, personal = false): Pick<SessionSettings, "permissionMode" | "plan"> {
+  if (personal && recorded && recorded !== "plan") return { permissionMode: recorded as PermissionMode, plan: false };
   const keptMode = meta.plan(threadId)?.permissionMode;
   if (personal && keptMode === "bypassPermissions") return { permissionMode: "bypassPermissions", plan: meta.plan(threadId)?.plan ?? recorded === "plan" };
   if (recorded !== "plan") return { permissionMode: recorded === "dontAsk" ? "dontAsk" : "default", plan: false };
@@ -570,7 +571,7 @@ export class ClaudeThreads {
       model: (summary && this.recordedModel(summary)) || this.defaultModel,
       effort: summary ? this.recordedEffort(summary) : null,
       fast: summary?.serviceTier === "fast",
-      readOnly: this.gateway.meta.plan(threadId)?.readOnly ?? true,
+      readOnly: this.gateway.meta.plan(threadId)?.readOnly ?? this.config.accessMode !== "personal",
       ...recordedPermissions(threadId, summary?.permissionMode, this.gateway.meta, this.config.accessMode === "personal"),
     };
   }
@@ -870,7 +871,19 @@ export class ClaudeThreads {
   }
 
   public async skills(cwds: readonly string[]): Promise<Map<string, JsonObject[]>> {
-    return new Map(cwds.map((cwd) => [cwd, []]));
+    if (this.config.accessMode !== "personal") return new Map(cwds.map((cwd) => [cwd, []]));
+    const entries = await Promise.all(cwds.map(async (cwd) => {
+      const cached = this.skillCache.get(cwd);
+      if (!cached || Date.now() - cached.at > 5 * 60_000) {
+        const skills = withProbeQuery(this.config, cwd, (probe) => probe.supportedCommands())
+          .then((commands) => Promise.all(commands.map((command) => mapSkill(this.config, cwd, command))));
+        // An outdated list answers at once while the fresh one loads.
+        this.skillCache.set(cwd, { at: Date.now(), skills: cached?.skills ?? skills.catch(() => []) });
+        if (cached) void skills.then((fresh) => this.skillCache.set(cwd, { at: Date.now(), skills: Promise.resolve(fresh) }), () => undefined);
+      }
+      return [cwd, await this.skillCache.get(cwd)!.skills] as const;
+    }));
+    return new Map(entries);
   }
 
   // ---- side chats (/side → Claude's native /btw) ----
@@ -1132,7 +1145,7 @@ export class ClaudeThreads {
     const thread = this.decorate(this.freshThread(session));
     // After the response, as stock: Desktop hides its new-chat draft's `thread/started` only once it knows the id.
     setImmediate(() => this.gateway.emit(threadId, "thread/started", { thread }));
-    // No cross-provider title generation.
+    if (this.config.accessMode === "personal") this.gateway.titles.track(threadId);
     this.prewarm(session);
     return { thread, ...this.settingsResponse(settings) };
   }
@@ -1144,8 +1157,13 @@ export class ClaudeThreads {
   private warmSession?: ClaudeSession;
   private warmTimer?: NodeJS.Timeout;
 
-  private prewarm(_session: ClaudeSession, _delayMs = 0): void {
-    // No speculative native process initialization.
+  private prewarm(session: ClaudeSession, delayMs = 0): void {
+    if (this.config.accessMode !== "personal") return;
+    clearTimeout(this.warmTimer);
+    if (this.warmSession !== session) this.warmSession?.discardWarm();
+    this.warmSession = session;
+    this.warmTimer = setTimeout(() => { if (this.sessions.get(session.threadId) === session) session.prewarm(); }, delayMs);
+    this.warmTimer.unref();
   }
 
   /** A new session, not announced (thread/start announces it; a provider switch keeps it hidden). */

@@ -1,0 +1,579 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result, bail};
+use clap::Parser;
+use clap::Subcommand;
+use codex_app_server_protocol::{
+    JSONRPCMessage, RemoteControlPairingStartParams, RemoteControlPairingStatusParams,
+    ServerNotification, ServerNotificationEnvelope, ServerRequest,
+};
+use codex_app_server_transport::{
+    CHANNEL_CAPACITY, ConnectionId, OutgoingError, OutgoingMessage, OutgoingResponse,
+    QueuedOutgoingMessage, RemoteControlHandle, RemoteControlPolicy, RemoteControlStartConfig,
+    RemoteControlStartupMode, TransportEvent, start_remote_control,
+};
+use codex_core::config::Config;
+use codex_core::resolve_installation_id;
+use codex_login::AuthManager;
+use futures::{SinkExt, StreamExt};
+use tokio::net::UnixStream;
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
+use tracing_subscriber::EnvFilter;
+
+#[derive(Debug, Parser)]
+struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+    #[arg(long)]
+    socket: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Parse shell scripts (a JSON array on stdin) with the exact Codex command-action parser: a JSON array of results.
+    ParseCommands,
+}
+
+/// A gateway command arriving on stdin: `{"id":1,"method":"remoteControl/pairing/start","params":{},"clientName":"codex-desktop"}`.
+#[derive(serde::Deserialize)]
+struct GatewayCommand {
+    id: serde_json::Value,
+    method: String,
+    #[serde(default)]
+    params: serde_json::Value,
+    #[serde(default, rename = "clientName")]
+    client_name: Option<String>,
+}
+
+fn command_response(id: serde_json::Value, result: Result<serde_json::Value, (i64, String)>) -> String {
+    match result {
+        Ok(result) => serde_json::json!({"type":"response","id":id,"result":result}).to_string(),
+        Err((code, message)) => {
+            serde_json::json!({"type":"response","id":id,"error":{"code":code,"message":message}}).to_string()
+        }
+    }
+}
+
+/// Mirrors stock `map_pairing_start_error`: invalid input is an invalid request, anything else internal.
+fn pairing_error(error: std::io::Error) -> (i64, String) {
+    let code = if error.kind() == std::io::ErrorKind::InvalidInput { -32600 } else { -32603 };
+    (code, error.to_string())
+}
+
+fn validate_pairing_status_params(params: &RemoteControlPairingStatusParams) -> Result<(), (i64, String)> {
+    match (&params.pairing_code, &params.manual_pairing_code) {
+        (Some(_), None) | (None, Some(_)) => Ok(()),
+        (Some(_), Some(_)) => Err((
+            -32600,
+            "remoteControl/pairing/status accepts either pairingCode or manualPairingCode, not both".into(),
+        )),
+        (None, None) => Err((
+            -32600,
+            "remoteControl/pairing/status requires pairingCode or manualPairingCode".into(),
+        )),
+    }
+}
+
+fn parse_params<T: serde::de::DeserializeOwned>(params: serde_json::Value) -> Result<T, (i64, String)> {
+    let params = if params.is_null() { serde_json::json!({}) } else { params };
+    serde_json::from_value(params).map_err(|error| (-32602, error.to_string()))
+}
+
+async fn run_gateway_command(handle: &RemoteControlHandle, line: &str) -> String {
+    let command: GatewayCommand = match serde_json::from_str(line) {
+        Ok(command) => command,
+        Err(error) => {
+            return command_response(serde_json::Value::Null, Err((-32700, error.to_string())));
+        }
+    };
+    let result = match command.method.as_str() {
+        "remoteControl/pairing/start" => match parse_params::<RemoteControlPairingStartParams>(command.params) {
+            Ok(params) => handle
+                .start_pairing(params, command.client_name.as_deref())
+                .await
+                .map_err(pairing_error)
+                .and_then(|response| serde_json::to_value(response).map_err(|error| (-32603, error.to_string()))),
+            Err(error) => Err(error),
+        },
+        "remoteControl/pairing/status" => match parse_params::<RemoteControlPairingStatusParams>(command.params) {
+            Ok(params) => match validate_pairing_status_params(&params) {
+                Ok(()) => handle
+                    .pairing_status(params)
+                    .await
+                    .map_err(pairing_error)
+                    .and_then(|response| serde_json::to_value(response).map_err(|error| (-32603, error.to_string()))),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        },
+        other => Err((-32601, format!("unsupported relay command '{other}'"))),
+    };
+    command_response(command.id, result)
+}
+
+struct ClientBridge {
+    to_gateway: mpsc::Sender<String>,
+    shutdown: CancellationToken,
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() -> std::io::Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result,
+        _ = terminate.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
+}
+
+fn outgoing_message(message: JSONRPCMessage, emitted_at_ms: Option<i64>) -> Result<OutgoingMessage> {
+    Ok(match message {
+        JSONRPCMessage::Request(request) => OutgoingMessage::Request(
+            serde_json::from_value::<ServerRequest>(serde_json::to_value(request)?)
+                .context("gateway emitted an unknown server request")?,
+        ),
+        JSONRPCMessage::Notification(notification) => {
+            OutgoingMessage::AppServerNotification(ServerNotificationEnvelope {
+                notification: serde_json::from_value::<ServerNotification>(serde_json::to_value(
+                    notification,
+                )?)
+                .context("gateway emitted an unknown server notification")?,
+                emitted_at_ms,
+            })
+        }
+        JSONRPCMessage::Response(response) => OutgoingMessage::Response(OutgoingResponse {
+            id: response.id,
+            result: response.result,
+        }),
+        JSONRPCMessage::Error(error) => OutgoingMessage::Error(OutgoingError {
+            id: error.id,
+            error: error.error,
+        }),
+    })
+}
+
+async fn bridge_client(
+    socket: PathBuf,
+    mut to_gateway: mpsc::Receiver<String>,
+    remote_writer: mpsc::Sender<QueuedOutgoingMessage>,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let stream = UnixStream::connect(&socket)
+        .await
+        .with_context(|| format!("connect hybrid gateway {}", socket.display()))?;
+    let (gateway, _) = tokio_tungstenite::client_async("ws://localhost/rpc", stream)
+        .await
+        .context("upgrade hybrid gateway websocket")?;
+    let (mut gateway_writer, mut gateway_reader) = gateway.split();
+
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            incoming = to_gateway.recv() => {
+                let Some(incoming) = incoming else { break };
+                gateway_writer.send(Message::Text(incoming.into())).await
+                    .context("write remote RPC to hybrid gateway")?;
+            }
+            outgoing = gateway_reader.next() => {
+                let Some(outgoing) = outgoing else { break };
+                match outgoing.context("read hybrid gateway RPC")? {
+                    Message::Text(text) => {
+                        let raw: serde_json::Value = serde_json::from_str(text.as_str())
+                            .context("decode hybrid gateway RPC")?;
+                        let emitted_at_ms = raw.get("emittedAtMs").and_then(serde_json::Value::as_i64);
+                        let rpc: JSONRPCMessage = serde_json::from_value(raw)
+                            .context("decode hybrid gateway RPC envelope")?;
+                        // A message the typed protocol rejects must not take the whole client down.
+                        let outgoing = match outgoing_message(rpc, emitted_at_ms) {
+                            Ok(outgoing) => outgoing,
+                            Err(error) => {
+                                warn!(%error, "dropping gateway message the remote-control protocol rejects");
+                                continue;
+                            }
+                        };
+                        remote_writer.send(QueuedOutgoingMessage::new(outgoing)).await
+                            .context("remote-control client closed")?;
+                    }
+                    Message::Ping(payload) => gateway_writer.send(Message::Pong(payload)).await
+                        .context("write gateway pong")?,
+                    Message::Close(_) => break,
+                    Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn run(args: Args) -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+
+    let config = Config::load_with_cli_overrides(Vec::new())
+        .await
+        .context("load Codex config")?;
+    let state_db = codex_core::init_state_db(&config)
+        .await
+        .context("Codex sqlite state DB is required for remote control")?;
+    let installation_id = resolve_installation_id(&config.codex_home)
+        .await
+        .context("resolve Codex installation id")?;
+    let policy = if config
+        .config_layer_stack
+        .requirements()
+        .allow_remote_control
+        .as_ref()
+        .is_some_and(|requirement| !requirement.value)
+    {
+        RemoteControlPolicy::DisabledByRequirements
+    } else {
+        RemoteControlPolicy::Allowed
+    };
+    if policy == RemoteControlPolicy::DisabledByRequirements {
+        bail!("remote control is disabled by managed requirements");
+    }
+    let auth_manager = AuthManager::shared_from_config(&config, false)
+        .await
+        .context("initialize Codex auth manager")?;
+    let shutdown = CancellationToken::new();
+    let (transport_tx, mut transport_rx) = mpsc::channel(CHANNEL_CAPACITY);
+    let (remote_task, remote_handle) = start_remote_control(
+        RemoteControlStartConfig {
+            remote_control_url: config.chatgpt_base_url.clone(),
+            installation_id,
+            policy,
+        },
+        Some(state_db),
+        auth_manager,
+        transport_tx,
+        shutdown.clone(),
+        None,
+        RemoteControlStartupMode::EnabledEphemeral,
+    )
+    .await
+    .context("start upstream Codex remote-control transport")?;
+
+    let mut status_rx = remote_handle.status_receiver();
+    let status_task = tokio::spawn(async move {
+        println!(
+            "{}",
+            serde_json::json!({"type":"status","params":*status_rx.borrow()})
+        );
+        println!("{}", serde_json::json!({"type":"ready"}));
+        while status_rx.changed().await.is_ok() {
+            println!(
+                "{}",
+                serde_json::json!({"type":"status","params":*status_rx.borrow()})
+            );
+        }
+    });
+
+    // The gateway drives pairing over stdin; responses share stdout with status lines.
+    let command_handle = remote_handle.clone();
+    let command_task = tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.trim().is_empty() {
+                continue;
+            }
+            println!("{}", run_gateway_command(&command_handle, &line).await);
+        }
+    });
+
+    let socket = args
+        .socket
+        .context("--socket is required for remote relay mode")?;
+    let mut clients = HashMap::<ConnectionId, ClientBridge>::new();
+    let signal = shutdown_signal();
+    tokio::pin!(signal);
+    loop {
+        tokio::select! {
+            signal = &mut signal => {
+                signal.context("wait for shutdown signal")?;
+                break;
+            }
+            event = transport_rx.recv() => {
+                let Some(event) = event else { break };
+                match event {
+                    TransportEvent::ConnectionOpened { connection_id, writer, disconnect_sender, .. } => {
+                        let (to_gateway, from_remote) = mpsc::channel(CHANNEL_CAPACITY);
+                        let client_shutdown = CancellationToken::new();
+                        let bridge_shutdown = client_shutdown.clone();
+                        let socket = socket.clone();
+                        tokio::spawn(async move {
+                            let result = bridge_client(
+                                socket,
+                                from_remote,
+                                writer,
+                                bridge_shutdown,
+                            ).await;
+                            if let Some(disconnect_sender) = disconnect_sender {
+                                disconnect_sender.cancel();
+                            }
+                            if let Err(error) = result {
+                                warn!(%connection_id, %error, "remote client bridge failed");
+                            }
+                        });
+                        clients.insert(connection_id, ClientBridge { to_gateway, shutdown: client_shutdown });
+                        info!(%connection_id, "remote client connected to hybrid gateway");
+                    }
+                    TransportEvent::IncomingMessage { connection_id, message } => {
+                        let Some(client) = clients.get(&connection_id) else {
+                            warn!(%connection_id, "dropping RPC for unknown remote client");
+                            continue;
+                        };
+                        let payload = serde_json::to_string(&message)?;
+                        if client.to_gateway.send(payload).await.is_err() {
+                            warn!(%connection_id, "hybrid gateway bridge closed");
+                        }
+                    }
+                    TransportEvent::ConnectionClosed { connection_id } => {
+                        if let Some(client) = clients.remove(&connection_id) {
+                            client.shutdown.cancel();
+                        }
+                        info!(%connection_id, "remote client disconnected from hybrid gateway");
+                    }
+                }
+            }
+        }
+    }
+
+    shutdown.cancel();
+    for client in clients.into_values() {
+        client.shutdown.cancel();
+    }
+    remote_task.await.context("join remote-control transport")?;
+    status_task.abort();
+    command_task.abort();
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    if matches!(args.command.as_ref(), Some(Command::ParseCommands)) {
+        let scripts: Vec<String> = serde_json::from_reader(std::io::stdin())?;
+        let parsed: Vec<_> = scripts
+            .into_iter()
+            .map(|script| {
+                codex_shell_command::parse_command::parse_command(&[
+                    "bash".to_string(),
+                    "-lc".to_string(),
+                    script,
+                ])
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&parsed)?);
+        return Ok(());
+    }
+    if !args
+        .socket
+        .as_ref()
+        .is_some_and(|socket| socket.is_absolute())
+    {
+        bail!("--socket must be absolute");
+    }
+    run(args).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_app_server_protocol::{
+        JSONRPCError, JSONRPCErrorError, JSONRPCNotification, JSONRPCResponse, RequestId,
+    };
+    use tokio::net::UnixListener;
+    use tokio_tungstenite::accept_async;
+
+    #[test]
+    fn maps_pairing_commands_like_stock() {
+        assert_eq!(
+            pairing_error(std::io::Error::new(std::io::ErrorKind::InvalidInput, "disabled")),
+            (-32600, "disabled".to_string())
+        );
+        assert_eq!(
+            pairing_error(std::io::Error::other("network")).0,
+            -32603
+        );
+        let both = RemoteControlPairingStatusParams {
+            pairing_code: Some("a".into()),
+            manual_pairing_code: Some("b".into()),
+        };
+        assert_eq!(validate_pairing_status_params(&both).unwrap_err().0, -32600);
+        let neither: RemoteControlPairingStatusParams = parse_params(serde_json::Value::Null).unwrap();
+        assert_eq!(validate_pairing_status_params(&neither).unwrap_err().0, -32600);
+        assert_eq!(
+            command_response(serde_json::json!(3), Err((-32601, "nope".into()))),
+            serde_json::json!({"type":"response","id":3,"error":{"code":-32601,"message":"nope"}}).to_string()
+        );
+        assert_eq!(
+            command_response(serde_json::json!("x"), Ok(serde_json::json!({"claimed":true}))),
+            serde_json::json!({"type":"response","id":"x","result":{"claimed":true}}).to_string()
+        );
+    }
+
+    #[test]
+    fn converts_response_and_error_without_typed_method_loss() {
+        let response = outgoing_message(JSONRPCMessage::Response(JSONRPCResponse {
+            id: RequestId::Integer(7),
+            result: serde_json::json!({"ok": true}),
+        }), None)
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({"id":7,"result":{"ok":true}})
+        );
+
+        let error = outgoing_message(JSONRPCMessage::Error(JSONRPCError {
+            id: RequestId::String("x".into()),
+            error: JSONRPCErrorError {
+                code: -32602,
+                message: "bad".into(),
+                data: None,
+            },
+        }), None)
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            serde_json::json!({"id":"x","error":{"code":-32602,"message":"bad"}})
+        );
+    }
+
+    #[test]
+    fn converts_known_server_notification() {
+        let notification = JSONRPCMessage::Notification(JSONRPCNotification {
+            method: "thread/name/updated".into(),
+            params: Some(
+                serde_json::json!({"threadId":"019f6232-67f2-7db2-993b-b89f56d2dc97","threadName":"mobile"}),
+            ),
+        });
+        let outgoing = outgoing_message(notification, Some(1_234)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&outgoing).unwrap()["method"],
+            "thread/name/updated"
+        );
+        assert_eq!(
+            serde_json::to_value(&outgoing).unwrap()["emittedAtMs"],
+            1_234
+        );
+    }
+
+    #[test]
+    fn parses_stock_capture_commands_into_native_actions() {
+        let list_script =
+            "rg --files /home/gk/.ccodex/current/node_modules/@gkorepanov/ccodex/dist | sed -n '1,240p'";
+        let list = codex_shell_command::parse_command::parse_command(&[
+            "bash".to_string(),
+            "-lc".to_string(),
+            list_script.to_string(),
+        ]);
+        assert_eq!(
+            serde_json::to_value(list).unwrap(),
+            serde_json::json!([{
+                "type": "list_files",
+                "cmd": "rg --files /home/gk/.ccodex/current/node_modules/@gkorepanov/ccodex/dist",
+                "path": "ccodex"
+            }])
+        );
+
+        let search_script = "rg -n -C 2 'forkThread|async fork|shouldFork' /home/gk/.ccodex/current/node_modules/@gkorepanov/ccodex/dist/handoff /home/gk/.ccodex/current/node_modules/@gkorepanov/ccodex/dist/claude --glob '*.js' | sed -n '1,300p'";
+        let search = codex_shell_command::parse_command::parse_command(&[
+            "bash".to_string(),
+            "-lc".to_string(),
+            search_script.to_string(),
+        ]);
+        assert_eq!(
+            serde_json::to_value(search).unwrap(),
+            serde_json::json!([{
+                "type": "search",
+                "cmd": "rg -n -C 2 'forkThread|async fork|shouldFork' /home/gk/.ccodex/current/node_modules/@gkorepanov/ccodex/dist/handoff /home/gk/.ccodex/current/node_modules/@gkorepanov/ccodex/dist/claude --glob '*.js'",
+                "query": "forkThread|async fork|shouldFork",
+                "path": "handoff"
+            }])
+        );
+
+        // Since 0.147 upstream treats `~` as a dynamic shell word, so
+        // tilde-path pipelines no longer classify into native actions.
+        let tilde_script =
+            "rg --files ~/.ccodex/current/node_modules/@gkorepanov/ccodex/dist | sed -n '1,240p'";
+        let tilde = codex_shell_command::parse_command::parse_command(&[
+            "bash".to_string(),
+            "-lc".to_string(),
+            tilde_script.to_string(),
+        ]);
+        assert_eq!(
+            serde_json::to_value(tilde).unwrap(),
+            serde_json::json!([{ "type": "unknown", "cmd": tilde_script }])
+        );
+    }
+
+    #[tokio::test]
+    async fn bridges_json_rpc_over_a_unix_websocket() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("gateway.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.unwrap();
+            let incoming = websocket
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&incoming).unwrap()["method"],
+                "turn/start"
+            );
+            websocket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "method": "thread/name/updated",
+                        "params": {
+                            "threadId": "019f6232-67f2-7db2-993b-b89f56d2dc97",
+                            "threadName": "mobile"
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            websocket.close(None).await.unwrap();
+        });
+        let (to_gateway, from_remote) = mpsc::channel(1);
+        let (remote_writer, mut outgoing) = mpsc::channel(1);
+        let shutdown = CancellationToken::new();
+        let bridge = tokio::spawn(bridge_client(
+            socket,
+            from_remote,
+            remote_writer,
+            shutdown.clone(),
+        ));
+        to_gateway
+            .send(serde_json::json!({"id":1,"method":"turn/start","params":{}}).to_string())
+            .await
+            .unwrap();
+        let outgoing = outgoing.recv().await.unwrap();
+        assert_eq!(
+            serde_json::to_value(outgoing.message).unwrap()["method"],
+            "thread/name/updated"
+        );
+        server.await.unwrap();
+        shutdown.cancel();
+        bridge.await.unwrap().unwrap();
+    }
+}

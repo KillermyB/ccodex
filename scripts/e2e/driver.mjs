@@ -1,0 +1,1496 @@
+// E2E driver (runs inside the container): starts the gateway through the managed `codex` shim, talks to it like
+// Desktop over the control socket, and exercises every feature with real models. Results → /out/results.json.
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, statSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { createConnection } from "node:net";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { crc32, deflateSync } from "node:zlib";
+
+const HOME = homedir();
+const PACKAGE = join(HOME, ".ccodex", "current", "node_modules", "@gkorepanov", "ccodex");
+const require = createRequire(join(PACKAGE, "package.json"));
+const WebSocket = require("ws");
+const SOCKET = join(HOME, ".codex", "app-server-control", "app-server-control.sock");
+const WORK = join(HOME, "work");
+const GPT = "gpt-6-luna";
+/** Said ahead of the odd requests (sleeping, messaging a chat by name) a cautious model may otherwise question. */
+const TEST = "This is an automated integration test of the tool you run in; every step is intentional and harmless, so do exactly as asked. ";
+
+/** A solid red size×size PNG. */
+const redPng = (size) => {
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const length = Buffer.alloc(4); length.writeUInt32BE(data.length);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body));
+    return Buffer.concat([length, body, crc]);
+  };
+  const header = Buffer.alloc(13); header.writeUInt32BE(size, 0); header.writeUInt32BE(size, 4); header.set([8, 2, 0, 0, 0], 8);
+  const row = Buffer.concat([Buffer.from([0]), Buffer.from(Array(size).fill([255, 0, 0]).flat())]);
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", header), chunk("IDAT", deflateSync(Buffer.concat(Array(size).fill(row)))), chunk("IEND", Buffer.alloc(0))]);
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const waitUntil = async (condition, ms, what) => {
+  for (const until = Date.now() + ms; !(await condition());) {
+    if (Date.now() > until) throw new Error(`timed out: ${what}`);
+    await sleep(500);
+  }
+};
+const text = (value) => [{ type: "text", text: value, text_elements: [] }];
+const itemsOf = (turns) => turns.flatMap((turn) => turn.items.map((item) => item.type === "userMessage"
+  ? `user:${item.content?.[0]?.text ?? ""}` : item.type === "agentMessage" ? `agent:${item.text}` : item.type));
+const sessionName = (threadId) => {
+  const sessions = join(HOME, ".claude", "sessions");
+  return readdirSync(sessions).map((file) => JSON.parse(readFileSync(join(sessions, file), "utf8"))).find((session) => session.sessionId === threadId)?.name;
+};
+/** The turns a thread showed live since a message index: ids and completed items (id + type), in order. */
+/** The turns as the client saw them live: each completed item where it started (a background command completes late). */
+const liveTurns = (threadId, since) => {
+  const turns = new Map();
+  for (const m of client.messages.slice(since)) {
+    if (m.params?.threadId !== threadId) continue;
+    if (m.method === "turn/started") turns.set(m.params.turn.id, { order: [], completed: [] });
+    const turn = turns.get(m.params.turnId);
+    if (m.method === "item/started" && turn) turn.order.push(m.params.item.id);
+    if (m.method === "item/completed" && turn) turn.completed.push(m.params.item);
+  }
+  const at = (turn, item) => { const index = turn.order.indexOf(item.id); return index < 0 ? Infinity : index; };
+  return [...turns].map(([id, turn]) => ({ id, items: turn.completed.map((item, index) => ({ item, index })).sort((a, b) => at(turn, a.item) - at(turn, b.item) || a.index - b.index).map(({ item }) => item) }));
+};
+/** Same turns with the same user messages and tools (reasoning and message split may differ between live and history). */
+const sameTurns = (live, history) => {
+  const shape = (turns) => JSON.stringify(turns.map((turn) => [turn.id, turn.items.filter((item) => !["reasoning", "agentMessage"].includes(item.type)).map((item) => `${item.type}:${item.id}`)]));
+  return shape(live) === shape(history);
+};
+/** A Claude process runs for the chat (started for a new session or resumed). */
+const claudeRunning = (threadId) => spawnSync("pgrep", ["-f", `claude .*--(session-id|resume)=${threadId}`]).status === 0;
+const items = async (threadId) => (await client.request("thread/read", { threadId, includeTurns: true })).thread.turns.flatMap((turn) => turn.items);
+/** Claude wrote a file: with its Write tool or a shell command (models pick either). */
+const wrote = (item) => item.type === "fileChange" || (item.type === "commandExecution" && item.status === "completed");
+const answers = (client, threadId, since = 0) => client.messages.slice(since)
+  .filter((m) => m.method === "item/completed" && m.params.threadId === threadId && m.params.item.type === "agentMessage")
+  .map((m) => m.params.item.text);
+
+class Client {
+  messages = [];
+  onRequest = () => ({ decision: "accept" });
+  asked = [];
+  /** Request id → method, to tell what a response answers. */
+  sent = new Map();
+  #next = 0;
+  #pending = new Map();
+
+  static async connect(name = "codex_desktop", path = SOCKET) {
+    const socket = new WebSocket("ws://ccodex/rpc", { createConnection: () => createConnection(path), perMessageDeflate: false });
+    await new Promise((resolve, reject) => { socket.once("open", resolve); socket.once("error", reject); });
+    const client = new Client(socket);
+    await client.request("initialize", { clientInfo: { name, title: "E2E", version: "26.917.51856" }, capabilities: { experimentalApi: true } });
+    socket.send(JSON.stringify({ method: "initialized" }));
+    return client;
+  }
+
+  constructor(socket) {
+    this.socket = socket;
+    socket.on("message", (data) => {
+      const message = JSON.parse(data.toString());
+      this.messages.push(message);
+      if (message.method !== undefined && message.id !== undefined) {
+        this.asked.push(message);
+        void Promise.resolve(this.onRequest(message)).then((result) => socket.send(JSON.stringify({ id: message.id, result })));
+        return;
+      }
+      if (message.method !== undefined) return;
+      const pending = this.#pending.get(message.id);
+      this.#pending.delete(message.id);
+      if (message.error) pending?.reject(Object.assign(new Error(message.error.message), { code: message.error.code }));
+      else pending?.resolve(message.result);
+    });
+  }
+
+  request(method, params = {}, timeoutMs = 120_000) {
+    const id = ++this.#next;
+    this.sent.set(id, method);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${method} timed out`)), timeoutMs);
+      this.#pending.set(id, { resolve: (value) => { clearTimeout(timer); resolve(value); }, reject: (error) => { clearTimeout(timer); reject(error); } });
+      this.socket.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  async waitFor(method, predicate = () => true, timeoutMs = 180_000, since = 0) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const found = this.messages.slice(since).find((m) => m.method === method && m.id === undefined && predicate(m.params));
+      if (found) return found.params;
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${method}`);
+      await sleep(50);
+    }
+  }
+
+  /** turn/start, then wait until `turns` turns (2 for a provider switch) have started and completed. */
+  async turn(threadId, value, extra = {}, timeoutMs = 240_000, turns = 1) {
+    const before = this.messages.length;
+    const response = await this.request("turn/start", { threadId, input: text(value), ...extra });
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const recent = this.messages.slice(before);
+      const done = recent.filter((m) => m.method === "turn/completed" && m.params.threadId === threadId);
+      const started = recent.filter((m) => m.method === "turn/started" && m.params.threadId === threadId);
+      if (done.length >= turns && done.length >= started.length) return { ...done.at(-1).params, response, answers: answers(this, threadId, before) };
+      if (Date.now() > deadline) throw new Error(`turn on ${threadId} did not complete`);
+      await sleep(100);
+    }
+  }
+
+  close() { this.socket.close(); }
+}
+
+const results = [];
+const state = {};
+let client;
+
+function check(condition, message, detail) {
+  if (!condition) throw Object.assign(new Error(message), { detail });
+}
+
+async function daemon(command, env = process.env) {
+  const output = execFileSync("codex", ["app-server", "daemon", command], { encoding: "utf8", timeout: 60_000, env });
+  for (let attempt = 0; command !== "stop" && !existsSync(SOCKET) && attempt < 100; attempt += 1) await sleep(100);
+  return output.trim();
+}
+
+const scenarios = {
+  async basics() {
+    const models = (await client.request("model/list", { includeHidden: false })).data;
+    state.models = models.map((model) => model.id);
+    state.haiku = state.models.find((id) => id.startsWith("claude:") && id.includes("haiku"));
+    state.opus = state.models.find((id) => id.startsWith("claude:") && id.includes("opus"));
+    check(state.haiku && state.opus && state.models.includes(GPT), "models merged", state.models);
+    const skills = await client.request("skills/list", { cwds: [WORK] });
+    const limits = await client.request("account/rateLimits/read", {});
+    return { models: state.models, skills: skills.data[0].skills.map((skill) => skill.name).slice(0, 20), limits: Object.keys(limits) };
+  },
+
+  /** What the gateway adds to each request Desktop makes on start, next to its own stock app-server (A/B). */
+  async latency() {
+    client.close();
+    let at = performance.now();
+    await daemon("restart");
+    const restartMs = Math.round(performance.now() - at);
+    client = await Client.connect();
+    const run = join(HOME, ".ccodex", "state", "run");
+    const stock = await Client.connect("codex_desktop", readdirSync(run).map((pid) => join(run, pid, "stock.sock")).find(existsSync));
+    const { thread } = await stock.request("thread/start", { model: GPT, cwd: WORK });
+    await stock.turn(thread.id, "Reply OK", { model: GPT });
+    const methods = [
+      ["model/list", { includeHidden: false }], ["skills/list", {}], ["plugin/list", {}], ["account/rateLimits/read", {}],
+      ["account/read", {}], ["config/read", {}], ["thread/list", { limit: 50 }], ["thread/read", { threadId: thread.id, includeTurns: true }],
+    ];
+    const rows = [];
+    for (const [method, params] of methods) {
+      const time = async (target) => { const start = performance.now(); await target.request(method, params); return performance.now() - start; };
+      const gateway = [], direct = [];
+      for (let round = 0; round < 7; round += 1) { direct.push(await time(stock)); gateway.push(await time(client)); }
+      const median = (values) => values.slice(1).sort((left, right) => left - right)[3];
+      rows.push({ method, stockMs: +median(direct).toFixed(1), gatewayMs: +median(gateway).toFixed(1), firstStockMs: Math.round(direct[0]), firstGatewayMs: Math.round(gateway[0]) });
+    }
+    stock.close();
+    // Methods stock answers from the network (plugins, rate limits) vary by hundreds of ms: reported, not checked.
+    const slow = rows.filter((row) => row.stockMs < 50 && row.gatewayMs > row.stockMs + 5);
+    check(!slow.length, "the gateway adds no noticeable latency", rows);
+    return { restartMs, rows };
+  },
+
+  async stockPassthrough() {
+    const { thread } = await client.request("thread/start", { model: GPT, cwd: WORK });
+    const done = await client.turn(thread.id, "Reply with exactly the word STOCK-OK and nothing else.", { model: GPT });
+    check(done.answers.join(" ").includes("STOCK-OK"), "stock answer", done.answers);
+    state.stock = thread.id;
+    return { answers: done.answers };
+  },
+
+  async claudeTools() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "on-request", sandbox: "workspace-write" });
+    state.claude = thread.id;
+    client.asked.length = 0;
+    const done = await client.turn(thread.id, "Use the Bash tool to run exactly this command: echo e2e-ok > /home/node/work/approved.txt\nThen reply with the single word DONE.");
+    check(existsSync(join(WORK, "approved.txt")), "command ran", done.answers);
+    const approvals = client.asked.filter((m) => m.method === "item/commandExecution/requestApproval").map((m) => m.params.command);
+    check(approvals.length > 0, "approval asked", client.asked.map((m) => m.method));
+    const { thread: read } = await client.request("thread/read", { threadId: thread.id, includeTurns: true });
+    const items = itemsOf(read.turns);
+    check(items.includes("commandExecution"), "commandExecution item persisted", items);
+    const list = await client.request("thread/list", { limit: 50 });
+    check(list.data.some((row) => row.id === thread.id), "listed", list.data.map((row) => row.id));
+    return { approvals, items, answers: done.answers };
+  },
+
+  /** Claude's process starts ahead of a first prompt: a new chat's at once, an earlier chat's once it stayed open 10 s. */
+  async prewarm() {
+    const running = (flag, id) => spawnSync("pgrep", ["-f", `claude .*--${flag}=${id}`]).status === 0;
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    await sleep(4_000);
+    check(running("session-id", thread.id), "a new chat's process runs before its first prompt");
+    let at = Date.now();
+    const fresh = await client.turn(thread.id, "Reply with the single word WARM-NEW.");
+    const newMs = Date.now() - at;
+    check(fresh.answers.join(" ").includes("WARM-NEW"), "the new chat answers", fresh.answers);
+
+    client.close();
+    await daemon("restart");
+    client = await Client.connect();
+    await client.request("thread/resume", { threadId: thread.id });
+    await sleep(3_000);
+    check(!running("resume", thread.id), "an earlier chat just opened has no process yet");
+    await sleep(9_000);
+    check(running("resume", thread.id), "an earlier chat open for 10 s has its process");
+    at = Date.now();
+    const again = await client.turn(thread.id, "What single word did you reply before? Reply with it only.");
+    const resumedMs = Date.now() - at;
+    check(again.answers.join(" ").includes("WARM-NEW"), "the earlier chat answers knowing its history", again.answers);
+    return { newMs, resumedMs };
+  },
+
+  async status() {
+    const stock = await client.turn(state.stock, "/ccstatus");
+    const claude = await client.turn(state.claude, "cc");
+    check(stock.answers[0]?.includes("◆ CCodex") && stock.answers[0]?.includes("Codex week"), "/ccstatus", stock.answers);
+    check(claude.answers[0]?.includes("❋ Claude"), "cc", claude.answers);
+    return { status: stock.answers[0], state: claude.answers[0] };
+  },
+
+  async titles() {
+    const since = client.messages.length;
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK });
+    await client.turn(thread.id, "In one sentence: what is a mutex?");
+    const claude = await client.waitFor("thread/name/updated", (p) => p.threadId === thread.id && p.threadName.endsWith("✳️"), 120_000, since);
+    const { thread: gpt } = await client.request("thread/start", { model: GPT, cwd: WORK });
+    await client.turn(gpt.id, "In one sentence: what is a semaphore?", { model: GPT });
+    const stock = await client.waitFor("thread/name/updated", (p) => p.threadId === gpt.id, 120_000, since);
+    check(claude.threadName.endsWith("✳️") && !stock.threadName.endsWith("✳️"), "✳️ only on Claude", { claude, stock });
+    // Claude's own title of the session (in its transcript) never shows: CCodex names it.
+    const shown = client.messages.slice(since).filter((m) => m.method === "thread/name/updated" && m.params.threadId === thread.id).map((m) => m.params.threadName);
+    check(shown.every((name) => name.endsWith("✳️")), "only CCodex's title shown", shown);
+    return { claude: shown, stock: stock.threadName };
+  },
+
+  async switchBothWays() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK });
+    state.switched = thread.id;
+    await client.turn(thread.id, "Remember this secret word: PINEAPPLE. Reply only with OK.");
+    const toGpt = await client.turn(thread.id, "What is the secret word I told you? Reply with just the word.", { model: GPT }, 400_000);
+    check(toGpt.answers.join(" ").toUpperCase().includes("PINEAPPLE"), "gpt knows the word", toGpt.answers);
+    const toClaude = await client.turn(thread.id, "Repeat the secret word once more, just the word.", { model: state.haiku }, 400_000);
+    check(toClaude.answers.join(" ").toUpperCase().includes("PINEAPPLE"), "claude knows the word", toClaude.answers);
+    const { thread: read } = await client.request("thread/read", { threadId: thread.id, includeTurns: true });
+    state.switchedTurns = read.turns;
+    const items = itemsOf(read.turns);
+    check(items.filter((item) => item === "contextCompaction").length >= 2, "two compactions in stitched history", items);
+    const rows = (await client.request("thread/list", { limit: 100 })).data.filter((row) => row.id === thread.id);
+    check(rows.length === 1, "one row", rows);
+    // Desktop's paging across the segments (the GPT one pages by stock's own cursors), from a fresh window's resume.
+    const fresh = await Client.connect();
+    const resumed = await fresh.request("thread/resume", { threadId: thread.id, excludeTurns: true });
+    const paged = [];
+    for (let cursor = resumed.turnsBackwardsCursor; cursor;) {
+      const page = await fresh.request("thread/turns/list", { threadId: thread.id, cursor, limit: 1, sortDirection: "desc", itemsView: "notLoaded" });
+      paged.unshift(...page.data.map((turn) => turn.id).reverse());
+      cursor = page.nextCursor;
+    }
+    check(JSON.stringify(paged) === JSON.stringify(read.turns.map((turn) => turn.id)), "paged turns = stitched turns", { paged, read: read.turns.map((turn) => turn.id) });
+    for (const turn of read.turns) {
+      const page = await fresh.request("thread/items/list", { threadId: thread.id, turnId: turn.id, limit: 100, sortDirection: "desc" });
+      const ids = page.data.map((entry) => entry.item.id).reverse();
+      check(JSON.stringify(ids) === JSON.stringify(turn.items.map((item) => item.id)), "turn items page", { turn: turn.id, ids, read: turn.items.map((item) => item.id) });
+    }
+    fresh.close();
+    return { items, paged: paged.length, row: { provider: rows[0].modelProvider, model: rows[0].model, name: rows[0].name } };
+  },
+
+  /**
+   * Desktop keeps the stock cursors it got before a GPT chat switched to Claude and scrolls up with them (issue #33):
+   * they page the same older turns and items as before the switch.
+   */
+  async staleCursorAfterSwitch() {
+    const { thread } = await client.request("thread/start", { model: GPT, cwd: WORK });
+    for (const word of ["ONE", "TWO", "THREE"]) await client.turn(thread.id, `Reply with exactly: ${word}`);
+    const page = (params) => client.request("thread/turns/list", { threadId: thread.id, sortDirection: "desc", itemsView: "notLoaded", ...params });
+    const newest = await page({ limit: 1 });
+    const olderTurns = async () => (await page({ cursor: newest.nextCursor, limit: 10 })).data.map((turn) => turn.id);
+    const resumed = await client.request("thread/resume", { threadId: thread.id, excludeTurns: true });
+    const oldTurn = newest.data[0].id;
+    const turnItems = async () => (await client.request("thread/items/list", { threadId: thread.id, turnId: oldTurn, cursor: resumed.itemsBackwardsCursor, limit: 100, sortDirection: "desc" })).data.map((entry) => entry.item.id);
+    const before = { turns: await olderTurns(), items: await turnItems() };
+    await client.turn(thread.id, "Reply with exactly: FOUR", { model: state.haiku }, 400_000);
+    const after = { turns: await olderTurns().catch((error) => error.message), items: await turnItems().catch((error) => error.message) };
+    check(JSON.stringify(after) === JSON.stringify(before), "pre-switch stock cursors page the same turns and items", { cursor: newest.nextCursor, itemsCursor: resumed.itemsBackwardsCursor, before, after });
+    return { turns: before.turns.length, items: before.items.length };
+  },
+
+  /**
+   * A Claude chat now on GPT, opened like Desktop after a restart: resume, then turns and items paged with the stock
+   * cursors it handed out (they name the GPT backend, which the client reads as the chat's id).
+   */
+  async reopenClaudeToGpt() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK });
+    await client.turn(thread.id, "Reply with exactly: ONE");
+    await client.turn(thread.id, "Reply with exactly: TWO", { model: GPT }, 400_000);
+    await client.turn(thread.id, "Reply with exactly: THREE", { model: GPT });
+    const { thread: read } = await client.request("thread/read", { threadId: thread.id, includeTurns: true });
+    const fresh = await Client.connect();
+    const resumed = await fresh.request("thread/resume", { threadId: thread.id, excludeTurns: true });
+    const turns = [];
+    for (let cursor = resumed.turnsBackwardsCursor; cursor;) {
+      const page = await fresh.request("thread/turns/list", { threadId: thread.id, cursor, limit: 1, sortDirection: "desc", itemsView: "notLoaded" });
+      turns.unshift(...page.data.map((turn) => turn.id).reverse());
+      cursor = page.nextCursor;
+    }
+    check(JSON.stringify(turns) === JSON.stringify(read.turns.map((turn) => turn.id)), "paged turns = stitched turns", { turns, read: read.turns.map((turn) => turn.id) });
+    const itemIds = (turn) => turn.items.map((item) => item.id).reverse();
+    for (const turn of read.turns) {
+      const page = await fresh.request("thread/items/list", { threadId: thread.id, turnId: turn.id, cursor: resumed.itemsBackwardsCursor, limit: 100, sortDirection: "desc" });
+      check(JSON.stringify(page.data.map((entry) => entry.item.id)) === JSON.stringify(itemIds(turn)), "turn items from resume's items cursor", { turn: turn.id, page: page.data.map((entry) => entry.item.id), read: itemIds(turn) });
+    }
+    const newest = read.turns.at(-1);
+    const items = [];
+    for (let cursor = resumed.itemsBackwardsCursor; cursor;) {
+      const page = await fresh.request("thread/items/list", { threadId: thread.id, turnId: newest.id, cursor, limit: 1, sortDirection: "desc" });
+      items.push(...page.data.map((entry) => entry.item.id));
+      cursor = page.nextCursor;
+    }
+    check(JSON.stringify(items) === JSON.stringify(itemIds(newest)), "newest turn's items paged one by one", { items, read: itemIds(newest) });
+    fresh.close();
+    return { turns: turns.length, items: items.length, itemsCursor: resumed.itemsBackwardsCursor };
+  },
+
+  /**
+   * A chat open in Desktop switched by another client (a script, the TUI, a phone): like stock, Desktop sees the switch
+   * turn and the next ones live, and its composer gets the model switched to (its next message stays on that provider).
+   */
+  async switchBySecondClient() {
+    const second = await Client.connect();
+    const run = async (from, to) => {
+      const { thread } = await client.request("thread/start", { model: from, cwd: WORK });
+      await client.turn(thread.id, "Reply with exactly: ONE", { model: from });
+      await second.request("thread/resume", { threadId: thread.id });
+      const since = client.messages.length;
+      const turns = [await second.turn(thread.id, "Reply with exactly: TWO", { model: to }, 400_000), await second.turn(thread.id, "Reply with exactly: THREE", { model: to })];
+      await sleep(1_000);
+      const seen = client.messages.slice(since).filter((m) => m.method === "turn/completed" && m.params.threadId === thread.id).map((m) => m.params.turn.id);
+      const said = answers(client, thread.id, since);
+      const settings = client.messages.slice(since).filter((m) => m.method === "thread/settings/updated" && m.params.threadId === thread.id).at(-1)?.params.threadSettings;
+      const detail = { seen, ran: turns.map((turn) => turn.turn.id), said, model: settings?.model };
+      check(JSON.stringify(seen) === JSON.stringify(detail.ran), `${from} → ${to}: Desktop saw the other client's turns complete`, detail);
+      check(said.join(" ").includes("TWO") && said.join(" ").includes("THREE"), `${from} → ${to}: Desktop saw the answers`, detail);
+      check(settings?.model === to, `${from} → ${to}: Desktop's composer got the model`, detail);
+      return detail;
+    };
+    const result = { toClaude: await run(GPT, state.haiku), toGpt: await run(state.haiku, GPT) };
+    second.close();
+    return result;
+  },
+
+  /**
+   * An upgrade from 0.4 (issue #36): codex installed by npm into ~/.local (its `bin/codex` is a relative link), set up
+   * by ccodex 0.4.25, then by this build, in a home of its own.
+   */
+  async upgradeFrom04() {
+    const home = join(HOME, "h04");
+    const env = { ...process.env, HOME: home, NPM_CONFIG_PREFIX: join(home, ".local"), PATH: `${home}/.ccodex/bin:${home}/.local/bin:/usr/local/bin:/usr/bin:/bin` };
+    const run = (command) => { const result = spawnSync("sh", ["-c", command], { env, encoding: "utf8", timeout: 900_000 }); return `${result.stdout}${result.stderr}`.trim(); };
+    execFileSync("mkdir", ["-p", home]);
+    const version = JSON.parse(readFileSync(join(PACKAGE, "package.json"), "utf8")).version;
+    const steps = {};
+    steps.codex = run("npm i -g @openai/codex --no-audit --no-fund >/dev/null 2>&1; readlink ~/.local/bin/codex");
+    steps.setup04 = run("npx --yes --package @gkorepanov/ccodex@0.4.25 ccodex setup 2>&1 | tail -4");
+    steps.backup04 = run("ls -l ~/.ccodex/backups/remote-codex 2>&1; test -e ~/.ccodex/backups/remote-codex && echo resolves || echo dangles");
+    steps.upgrade = run(`CCODEX_PACKAGE_SPEC=/tmp/ccodex.tgz CCODEX_RELAY_PACKAGE_SPEC=/tmp/relay.tgz ccodex setup --version ${version} 2>&1 | grep -v "^installed "`);
+    steps.doctor = run("ccodex doctor 2>&1 | grep 'codex:'");
+    steps.backup = run("readlink ~/.ccodex/backups/remote-codex; readlink ~/.local/bin/codex");
+    run("codex app-server daemon stop");
+    // The codex npm installed stays the one CCodex runs: the upgrade neither loses it nor installs another.
+    check(steps.doctor.includes(`✓ codex: ${home}/.ccodex/backups/remote-codex`) && !steps.upgrade.includes("No codex on PATH")
+      && steps.backup.startsWith(`${home}/.local/lib/node_modules/@openai/codex/bin/codex.js`), "the upgrade from 0.4 keeps the installed codex", steps);
+    check(!existsSync(join(home, ".claude", "CLAUDE.md")), "setup leaves CLAUDE.md alone", steps.upgrade);
+    check(steps.upgrade.includes("The workforce skill has become outdated") && existsSync(join(home, ".claude", "skills", "workforce")), "setup leaves 0.4's workforce skill to the user, with a notice", steps.upgrade);
+    return steps;
+  },
+
+  /** Find in chat across a switched thread's segments (stock's own search for the GPT one), and search of all chats. */
+  async searchInChat() {
+    const threadId = state.switched;
+    const { data } = await client.request("thread/searchOccurrences", { threadId, searchTerm: "pineapple", limit: 250 });
+    const turns = new Map(state.switchedTurns.map((turn) => [turn.id, turn]));
+    check(data.every((found) => found.snippet.slice(found.snippetMatchRange.start, found.snippetMatchRange.end).toLowerCase() === "pineapple"), "match ranges", data);
+    const segments = new Set(data.map((found) => state.switchedTurns.findIndex((turn) => turn.id === found.turnId)));
+    check(data.length >= 3 && !segments.has(-1), "occurrences in stitched turns", data);
+    // The GPT segment's turn: its answer names the word.
+    const gpt = state.switchedTurns.find((turn) => turn.items.some((item) => item.type === "userMessage" && JSON.stringify(item.content).includes("What is the secret word")));
+    check(data.some((found) => found.turnId === gpt?.id && turns.get(found.turnId).items.find((item) => item.id === found.itemId)?.type === "agentMessage"), "found in the gpt answer too", { gpt: gpt?.id, data });
+    // Desktop opens each match by its turn cursor.
+    for (const found of data) {
+      const { data: [turn] } = await client.request("thread/turns/list", { threadId, cursor: found.turnCursor, limit: 1, sortDirection: "desc", itemsView: "full" });
+      check(turn?.id === found.turnId && turn.items.some((item) => item.id === found.itemId), "turn cursor opens the match", { found, turn: turn?.id });
+    }
+    const listed = (await client.request("thread/search", { searchTerm: "PINEAPPLE", limit: 50 })).data.map((result) => result.thread.id);
+    check(listed.includes(threadId), "search of all chats finds it", listed);
+    return { occurrences: data.length, turns: [...segments] };
+  },
+
+  /** Copies of very big real transcripts (mounted at /big, container only): search of all chats and in chat, timed. */
+  async searchBigChats() {
+    if (!existsSync("/big")) throw new Error("mount big transcripts at /big (E2E_PODMAN_ARGS='-v <dir>:/big:ro')");
+    const dir = join(HOME, ".claude", "projects", "-home-node-big");
+    mkdirSync(dir, { recursive: true });
+    const report = [];
+    for (const file of readdirSync("/big").filter((name) => name.endsWith(".jsonl"))) {
+      copyFileSync(join("/big", file), join(dir, file));
+      const threadId = file.slice(0, -6);
+      // A word of the first prompt: the oldest turn holds it, so find in chat reads back to it.
+      const lines = readFileSync(join(dir, file), "utf8").split("\n");
+      const promptText = (record) => record?.type === "user" && !record.isMeta && !record.isSidechain && !record.isCompactSummary
+        ? typeof record.message?.content === "string" ? record.message.content : (record.message?.content ?? []).filter((block) => block.type === "text").map((block) => block.text).join("\n")
+        : "";
+      const prompt = lines.map((line) => { try { return promptText(JSON.parse(line)); } catch { return ""; } })
+        .find((text) => !text.trimStart().startsWith("<") && /[A-Za-zА-Яа-я]{7,}/u.test(text));
+      const term = prompt.match(/[A-Za-zА-Яа-я]{7,}/u)[0];
+      const timed = async (method, params) => { const at = Date.now(); const result = await client.request(method, params); return [result, Date.now() - at]; };
+      await waitUntil(async () => (await client.request("thread/list", { limit: 200 })).data.some((row) => row.id === threadId), 60_000, `${threadId} listed`);
+      const [all, searchMs] = await timed("thread/search", { searchTerm: term, limit: 50 });
+      check(all.data.some((result) => result.thread.id === threadId), "search of all chats finds it", { term, threadId });
+      const [found, findMs] = await timed("thread/searchOccurrences", { threadId, searchTerm: term, limit: 250 });
+      check(found.data.length > 0, "find in chat", { term, threadId });
+      const first = found.data[0];
+      const [{ data: [turn] }, openMs] = await timed("thread/turns/list", { threadId, cursor: first.turnCursor, limit: 1, sortDirection: "desc", itemsView: "full" });
+      check(turn?.id === first.turnId && turn.items.some((item) => item.id === first.itemId), "turn cursor opens the oldest match", { first, turn: turn?.id });
+      const [absent, absentMs] = await timed("thread/searchOccurrences", { threadId, searchTerm: "zq-absent-term-xj", limit: 250 });
+      check(absent.data.length === 0 && absentMs < 3000, "nothing found at once", { absentMs });
+      const [newest, pageMs] = await timed("thread/turns/list", { threadId, limit: 5, sortDirection: "desc", itemsView: "full" });
+      check(newest.data.length === 5, "newest page after the search", newest.data.length);
+      check(searchMs < 10_000 && findMs < 30_000 && openMs < 30_000, "fast enough", { searchMs, findMs, openMs });
+      report.push({ file, mb: Math.round(statSync(join(dir, file)).size / 1e6), term, occurrences: found.data.length, more: found.nextCursor !== null, searchMs, findMs, openMs, absentMs, pageMs });
+    }
+    return report;
+  },
+
+  async forkBeforeCompaction() {
+    const first = state.switchedTurns[0];
+    const { thread } = await client.request("thread/fork", { threadId: state.switched, lastTurnId: first.id });
+    const { thread: read } = await client.request("thread/read", { threadId: thread.id, includeTurns: true });
+    const items = itemsOf(read.turns);
+    check(!items.includes("contextCompaction") && read.turns.length === 1, "fork has only the first turn", items);
+    const done = await client.turn(thread.id, "What is the secret word? Just the word.", { model: state.haiku });
+    check(done.answers.join(" ").toUpperCase().includes("PINEAPPLE"), "fork continues with full context", done.answers);
+    return { items, answers: done.answers };
+  },
+
+  async rollbackAcrossSwitch() {
+    const before = state.switchedTurns.length;
+    const result = await client.request("thread/rollback", { threadId: state.switched, numTurns: 2 });
+    const { thread: read } = await client.request("thread/read", { threadId: state.switched, includeTurns: true });
+    check(read.turns.length === before - 2, "two turns fewer", { before, after: read.turns.length, items: itemsOf(read.turns) });
+    const done = await client.turn(state.switched, "Say the secret word again, just the word.", { model: GPT }, 300_000);
+    check(done.answers.join(" ").toUpperCase().includes("PINEAPPLE"), "continues after rollback", done.answers);
+    return { after: itemsOf(read.turns), rollbackTurns: result.thread.turns.length, answers: done.answers };
+  },
+
+  /** Desktop's goal actions on a Claude chat: set → met, pause and resume, edit and clear while Claude pursues a goal. */
+  async goal() {
+    const dir = join(WORK, "goal-e2e");
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK });
+    const threadId = thread.id;
+    await client.turn(threadId, "Reply only with OK.");
+    const since = client.messages.length;
+    const after = (method, predicate, from, ms = 240_000) => client.waitFor(method, (p) => p.threadId === threadId && predicate(p), ms, from);
+    // Desktop: set, then clear once the goal is reported complete.
+    let from = client.messages.length;
+    const set = await client.request("thread/goal/set", { threadId, objective: `The file ${dir}/a.txt exists and contains the letter A.`, status: "active" });
+    check(set.goal?.status === "active", "goal set", set);
+    const met = await after("thread/goal/updated", (p) => p.goal.status === "complete", from);
+    check(met.turnId, "completion names its turn", met);
+    check((await client.request("thread/goal/clear", { threadId })).cleared === true, "completed goal cleared");
+    check((await client.request("thread/goal/get", { threadId })).goal === null, "no goal after clear");
+    // A goal Claude keeps pursuing: pause stops it (kept as paused), resume goes on, an edit replaces it.
+    const long = (name) => `Files ${dir}/${name}1.txt through ${dir}/${name}40.txt exist, each containing its number. Create exactly ONE file per turn, then end the turn.`;
+    from = client.messages.length;
+    await client.request("thread/goal/set", { threadId, objective: long("n"), status: "active" });
+    await after("item/completed", (p) => wrote(p.item), from);
+    const pausedAt = client.messages.length;
+    const paused = await client.request("thread/goal/set", { threadId, status: "paused" });
+    check(paused.goal?.status === "paused" && paused.goal.objective === long("n"), "goal paused", paused);
+    const halted = await after("turn/completed", () => true, pausedAt, 60_000);
+    check(halted.turn.status === "interrupted", "pause stops the running goal turn", halted);
+    await sleep(8000);
+    const idle = client.messages.slice(pausedAt).filter((m) => m.method === "turn/started" && m.params.threadId === threadId);
+    check(idle.length === 0, "no turn while paused", idle);
+    check((await client.request("thread/goal/get", { threadId })).goal?.status === "paused", "goal stays paused");
+    from = client.messages.length;
+    const resumed = await client.request("thread/goal/set", { threadId, status: "active" });
+    check(resumed.goal?.status === "active" && resumed.goal.objective === long("n"), "goal resumed", resumed);
+    await after("item/completed", (p) => wrote(p.item), from);
+    from = client.messages.length;
+    await client.request("thread/goal/set", { threadId, objective: `The file ${dir}/done.txt exists and contains DONE.`, status: "active" });
+    const stopped = await after("turn/completed", () => true, from, 60_000);
+    check(stopped.turn.status === "interrupted", "an edit stops the running goal turn", stopped);
+    const edited = await after("thread/goal/updated", (p) => p.goal.status === "complete", from);
+    check(edited.goal.objective.includes("done.txt"), "the edited goal is the one met", edited);
+    check(existsSync(join(dir, "done.txt")), "done.txt written");
+    await client.request("thread/goal/clear", { threadId });
+    // Clear while Claude pursues a goal: the turn stops, no turn follows, Claude's goal is gone.
+    from = client.messages.length;
+    await client.request("thread/goal/set", { threadId, objective: long("m"), status: "active" });
+    await after("item/completed", (p) => wrote(p.item), from);
+    const clearedAt = client.messages.length;
+    check((await client.request("thread/goal/clear", { threadId })).cleared === true, "running goal cleared");
+    const cut = await after("turn/completed", () => true, clearedAt, 60_000);
+    check(cut.turn.status === "interrupted", "clear stops the running goal turn", cut);
+    await sleep(8000);
+    const later = client.messages.slice(clearedAt).filter((m) => m.method === "turn/started" && m.params.threadId === threadId);
+    check(later.length === 0, "no turn after clear", later);
+    check((await client.request("thread/goal/get", { threadId })).goal === null, "no goal after clearing a running one");
+    // No "Goal set: …" / "No goal set" in the chat, live or in history; history has the turns the chat saw.
+    const history = await client.request("thread/read", { threadId, includeTurns: true });
+    const said = [...answers(client, threadId, since), ...history.thread.turns.flatMap((turn) => turn.items).filter((item) => item.type === "agentMessage").map((item) => item.text)];
+    check(!said.some((line) => /^(?:Goal set: |Goal cleared|No goal set)/u.test(line)), "no goal notices in the chat", said.filter((line) => /goal/iu.test(line)));
+    const liveCount = client.messages.filter((m) => m.method === "turn/started" && m.params.threadId === threadId).length;
+    check(history.thread.turns.length === liveCount, "history has the live turns", { history: history.thread.turns.length, live: liveCount });
+    // Desktop's goal mode on a new chat sends the goal's message as a turn, then sets the goal; an edit then replaces it
+    // (before: a second `/goal` queued behind that turn set the old goal again, and its completion cleared the new one).
+    const { thread: fresh } = await client.request("thread/start", { model: state.haiku, cwd: WORK });
+    const onFresh = (method, predicate, since, ms = 240_000) => client.waitFor(method, (p) => p.threadId === fresh.id && predicate(p), ms, since);
+    from = client.messages.length;
+    await client.request("turn/start", { threadId: fresh.id, input: text(`/goal ${long("g")}\n`) });
+    await sleep(200);
+    await client.request("thread/goal/set", { threadId: fresh.id, objective: long("g"), status: "active" });
+    await onFresh("item/completed", (p) => p.item.type === "fileChange", from);
+    const editedAt = client.messages.length;
+    await client.request("thread/goal/set", { threadId: fresh.id, objective: `The file ${dir}/redo.txt exists and contains REDO.`, status: "active" });
+    const replaced = await onFresh("turn/completed", () => true, editedAt, 60_000);
+    check(replaced.turn.status === "interrupted", "an edit stops the goal-mode turn", replaced);
+    const redone = await onFresh("thread/goal/updated", (p) => p.goal.status === "complete", editedAt);
+    check(redone.goal.objective.includes("redo.txt"), "the edited goal is the one met after goal mode", redone);
+    check(existsSync(join(dir, "redo.txt")), "redo.txt written");
+    await client.request("thread/goal/clear", { threadId: fresh.id });
+    return { turns: liveCount, files: readdirSync(dir).length };
+  },
+
+  async side() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK });
+    await client.turn(thread.id, "My favorite color is teal. Reply only with OK.");
+    const { thread: side } = await client.request("thread/fork", { threadId: thread.id, ephemeral: true, excludeTurns: true, threadSource: "user" });
+    // Desktop opens a side chat with a boundary message.
+    const boundary = [{ type: "message", role: "user", content: [{ type: "input_text", text: "Side conversation boundary." }] }];
+    await client.request("thread/inject_items", { threadId: side.id, items: boundary });
+    const done = await client.turn(side.id, "What is my favorite color? One word.");
+    check(done.answers.join(" ").toLowerCase().includes("teal"), "side sees the context", done.answers);
+    const main = await client.request("thread/read", { threadId: thread.id, includeTurns: true });
+    check(main.thread.turns.length === 1, "side leaves the thread alone", itemsOf(main.thread.turns));
+    const stockSide = await client.request("thread/fork", { threadId: state.stock, ephemeral: true, excludeTurns: true, threadSource: "user" });
+    await client.request("thread/inject_items", { threadId: stockSide.thread.id, items: boundary });
+    const stockDone = await client.turn(stockSide.thread.id, "Reply with the word SIDE-OK.", { model: GPT });
+    return { claude: done.answers, stock: stockDone.answers };
+  },
+
+  async subagents() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    const done = await client.turn(thread.id, "In ONE message, launch TWO Agent tool calls in parallel (subagent_type general-purpose): one described 'Alpha echo' with the prompt 'Reply with the word ALPHA-OK', one described 'Beta echo' with the prompt 'Reply with the word BETA-OK'. Then tell me exactly what each replied.", {}, 300_000);
+    const children = (await client.request("thread/list", { limit: 20, parentThreadId: thread.id, sourceKinds: ["subAgentThreadSpawn"] })).data;
+    const { thread: read } = await client.request("thread/read", { threadId: thread.id, includeTurns: true });
+    const spawns = read.turns.flatMap((turn) => turn.items).filter((item) => item.type === "collabAgentToolCall");
+    const names = children.map((child) => child.agentNickname);
+    check(children.length === 2 && names.some((name) => /Alpha/u.test(name)) && names.some((name) => /Beta/u.test(name)), "both parallel sub-agents listed by name", { names, answers: done.answers });
+    check(spawns.length >= 2 && spawns.every((item) => item.status === "completed"), "both spawns settled in the parent", spawns.map((item) => item.status));
+    const childItems = [];
+    for (const child of children) childItems.push(itemsOf((await client.request("thread/read", { threadId: child.id, includeTurns: true })).thread.turns));
+    check(childItems.some((items) => items.some((item) => item.includes("ALPHA-OK"))) && childItems.some((items) => items.some((item) => item.includes("BETA-OK"))), "each sub-agent's chat has its answer", childItems);
+    return { names, childItems, answers: done.answers };
+  },
+
+  /** What `ccodex setup` installs on a clean machine lets Claude delegate to Codex: codex-wrapper → codex MCP → Codex's messages in the sub-agent's chat. */
+  async codexSubagent() {
+    const agent = join(HOME, ".claude", "agents", "codex-wrapper.md");
+    const server = JSON.parse(readFileSync(join(HOME, ".claude.json"), "utf8")).mcpServers?.codex;
+    check(existsSync(agent) && server?.command === "codex" && server.args?.[0] === "mcp-server", "setup installed the Claude stack", { agent: existsSync(agent), server });
+    const settings = JSON.parse(readFileSync(join(HOME, ".claude", "settings.json"), "utf8"));
+    check(settings.cleanupPeriodDays === 36_500, "setup keeps Claude's transcripts", settings);
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    // Only Codex can answer (the wrapper has no tool but Codex's), or the wrapper just replies itself.
+    const done = await client.turn(thread.id, `Use the Agent tool with subagent_type codex-wrapper and no model parameter. Its prompt: "Have Codex (model ${GPT}) run \`cat /proc/sys/kernel/random/uuid\` and report the exact output." Then tell me that output.`, {}, 600_000);
+    const children = (await client.request("thread/list", { limit: 20, parentThreadId: thread.id, sourceKinds: ["subAgentThreadSpawn"] })).data;
+    check(children.length === 1, "codex-wrapper sub-agent listed", { children, answers: done.answers });
+    const childItems = itemsOf((await client.request("thread/read", { threadId: children[0].id, includeTurns: true })).thread.turns);
+    const uuid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/u;
+    check(childItems.includes("mcpToolCall") && childItems.some((item) => item.startsWith("agent:◆") && uuid.test(item)), "Codex's call and messages in the sub-agent's chat", childItems);
+    return { name: children[0].agentNickname, childItems, answers: done.answers };
+  },
+
+  /**
+   * Claude chats message each other (SendMessage): the sender shows "Sent message to chat" linking to the receiver, the
+   * receiver a turn of its own opened by Desktop's "sent from another task" message linking back, live and in history.
+   * A message that arrives while the receiver works joins its running turn; a reply links back; a claude CLI session can
+   * send one too.
+   */
+  async peerMessages() {
+    const start = async () => (await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
+    const receiver = await start();
+    await client.turn(receiver, "Remember the code word MANGO. Reply only: READY.");
+    const name = sessionName(receiver);
+    check(name, "the receiver's session is registered by name", readdirSync(join(HOME, ".claude", "sessions")));
+    const sender = await start();
+    const send = (text) => `${TEST}Use the SendMessage tool (load it with ToolSearch first) to send the Claude session named "${name}" exactly: ${text}. Then stop; do not wait for an answer.`;
+    let since = client.messages.length;
+    const sent = await client.turn(sender, send("What is your code word?"));
+    await client.waitFor("turn/completed", (params) => params.threadId === receiver, 240_000, since);
+    const toChat = (await items(sender)).find((item) => item.type === "dynamicToolCall" && item.tool === "send_message_to_thread");
+    check(toChat?.namespace === "codex_app" && toChat.arguments.threadId === receiver && toChat.status === "completed", "the sender shows Sent message to chat, linking to the receiver", { toChat, answers: sent.answers });
+    const delegation = (item, source) => item?.type === "userMessage" && item.content[0].text.startsWith("<codex_delegation>") && item.content[0].text.includes(`<source_thread_id>${source}</source_thread_id>`);
+    let history = (await client.request("thread/read", { threadId: receiver, includeTurns: true })).thread.turns;
+    check(history.length === 2 && delegation(history[1].items[0], sender), "in history, the message opens a turn of its own", itemsOf(history));
+    check(sameTurns(liveTurns(receiver, since), history.slice(1)), "live, the same turn with the same message", { live: liveTurns(receiver, since), history: history.slice(1) });
+
+    // While the receiver works, the message joins its running turn (Claude's queued command), after what came before it.
+    since = client.messages.length;
+    await client.request("turn/start", { threadId: receiver, input: text(`${TEST}Run this exact bash command (it stands in for a 25-second build): python3 -c 'import time; time.sleep(25)' — then reply with the single word SLEPT.`) });
+    await client.waitFor("item/started", (params) => params.threadId === receiver && params.item.type === "commandExecution", 120_000, since);
+    await client.turn(sender, send("PING-MID"));
+    await client.waitFor("turn/completed", (params) => params.threadId === receiver, 240_000, since);
+    history = (await client.request("thread/read", { threadId: receiver, includeTurns: true })).thread.turns;
+    const running = history.at(-1).items;
+    const mid = running.findIndex((item) => delegation(item, sender) && item.content[0].text.includes("PING-MID"));
+    check(history.length === 3 && mid > running.findIndex((item) => item.type === "commandExecution"), "a message sent while the receiver works joins its running turn", itemsOf(history.slice(2)));
+    check(sameTurns(liveTurns(receiver, since), history.slice(2)), "live too", { live: liveTurns(receiver, since), history: history.slice(2) });
+
+    // A reply goes to the address the message came from (uds:<socket>), not a name.
+    since = client.messages.length;
+    await client.turn(receiver, "Use SendMessage to reply PONG to the agent that sent you PING-MID (to: the address it came from). Then stop; do not wait for an answer.");
+    const reply = (item) => item.type === "dynamicToolCall" && item.tool === "send_message_to_thread" && item.arguments.threadId === sender;
+    const liveReply = client.messages.slice(since).find((m) => m.method === "item/completed" && m.params.threadId === receiver && (m.params.item.type === "dynamicToolCall" || m.params.item.tool === "sendInput"))?.params.item;
+    check(liveReply && reply(liveReply), "a reply shows Sent message to chat, linking to the sender", liveReply);
+    history = (await client.request("thread/read", { threadId: receiver, includeTurns: true })).thread.turns;
+    check(history.at(-1).items.some(reply), "in history too", itemsOf(history.slice(3)));
+    await client.waitFor("turn/completed", (params) => params.threadId === sender, 240_000, since).catch(() => undefined);
+
+    // A claude CLI session (listed as a chat of its own) sends one.
+    since = client.messages.length;
+    const claude = join(dirname(require.resolve("@anthropic-ai/claude-agent-sdk-linux-x64/package.json")), "claude");
+    const cli = spawnSync(claude, ["-p", send("FROM-CLI"), "--model", "haiku", "--dangerously-skip-permissions", "--output-format", "json"], { cwd: WORK, encoding: "utf8", timeout: 180_000 });
+    check(cli.status === 0, "claude -p ran", cli.stderr);
+    const { session_id: cliSession, result: cliSaid } = JSON.parse(cli.stdout);
+    await client.waitFor("turn/completed", (params) => params.threadId === receiver, 240_000, since)
+      .catch((error) => { throw Object.assign(error, { detail: { cliSaid } }); });
+    history = (await client.request("thread/read", { threadId: receiver, includeTurns: true })).thread.turns;
+    check(delegation(history.at(-1).items[0], cliSession), "a CLI session's message links to its chat", itemsOf(history.slice(4)));
+    check(sameTurns(liveTurns(receiver, since), history.slice(4)), "live too", { live: liveTurns(receiver, since), history: history.slice(4) });
+    return { name, toChat: toChat.arguments, midTurn: itemsOf(history.slice(2, 3)), cli: cliSession };
+  },
+
+  /**
+   * A chat's sub-agents: a message to one shows as "Messaged <agent>" (also in a chat's first turn, and after the daemon
+   * restarted), a message from one to the chat opens a turn of its own linking to the sub-agent, live and in history.
+   */
+  async peerSubagents() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    let since = client.messages.length;
+    await client.turn(thread.id, "Use the Agent tool with run_in_background: true, subagent_type general-purpose, no model parameter, description 'Reporter' and prompt: 'Use the SendMessage tool (load it with ToolSearch first) to send the main agent that started you (your parent / team lead) the message REPORT-OK. Then reply with the word DONE.'. Right after, use SendMessage to send that agent (to: its agent id) the message 'Thanks.'. Then stop without waiting.", {}, 300_000);
+    const child = client.messages.slice(since).find((m) => m.method === "item/completed" && m.params.threadId === thread.id && m.params.item.tool === "spawnAgent")?.params.item.receiverThreadIds[0];
+    const message = (item) => item.type === "collabAgentToolCall" && item.tool === "sendInput";
+    const liveMessage = client.messages.slice(since).find((m) => m.method === "item/completed" && m.params.threadId === thread.id && message(m.params.item))?.params.item;
+    check(child && liveMessage?.receiverThreadIds[0] === child, "in a chat's first turn, a message to its sub-agent goes to its thread (Messaged <agent>)", { child, liveMessage });
+    // The sub-agent's message (no command of its own): a turn of its own when it came after the turn's result (Claude
+    // answers it right away), else part of the running turn.
+    const delegated = (turn) => turn.items.some((item) => item.type === "userMessage" && item.content[0].text.includes(`<source_thread_id>${child}</source_thread_id>`) && item.content[0].text.includes("REPORT-OK"));
+    for (let attempt = 0; attempt < 600 && !liveTurns(thread.id, since).some(delegated); attempt += 1) await sleep(200);
+    await client.waitFor("thread/status/changed", (params) => params.threadId === thread.id && params.status.type === "idle", 240_000, client.messages.length - 1).catch(() => undefined);
+    await sleep(3000);
+    const history = (await client.request("thread/read", { threadId: thread.id, includeTurns: true })).thread.turns;
+    check(history.some(delegated), "the sub-agent's message links to its thread", itemsOf(history));
+    check(sameTurns(liveTurns(thread.id, since), history), "live, the same turns", { live: liveTurns(thread.id, since), history });
+
+    // After a restart the chat's process is new; its earlier sub-agent is still known.
+    client.close();
+    await daemon("restart");
+    client = await Client.connect();
+    await client.request("thread/resume", { threadId: thread.id });
+    since = client.messages.length;
+    await client.turn(thread.id, `Use SendMessage to send the agent ${child.slice("agent-".length)} (to: that id) the message 'Again.'. Then stop without waiting.`, {}, 300_000);
+    const again = client.messages.slice(since).find((m) => m.method === "item/completed" && m.params.threadId === thread.id && message(m.params.item))?.params.item;
+    check(again?.receiverThreadIds[0] === child, "after a restart, a message to an earlier sub-agent goes to its thread", again);
+    return { child, turns: history.map((turn) => turn.items[0]?.content?.[0]?.text?.slice(0, 80)) };
+  },
+
+  /** An image attached in Desktop (a local file) reaches Claude and stays on the user message. */
+  async claudeImage() {
+    const image = join(WORK, "red.png");
+    writeFileSync(image, redPng(64));
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK });
+    const input = [...text("What single color fills this image? Reply with one lowercase word."), { type: "localImage", path: image }];
+    const done = await client.turn(thread.id, "", { input });
+    check(/\bred\b/iu.test(done.answers.join(" ")), "Claude saw the image", done.answers);
+    const user = (await client.request("thread/read", { threadId: thread.id, includeTurns: true })).thread.turns[0].items.find((item) => item.type === "userMessage");
+    // Read back from Claude's transcript, the file comes back inlined.
+    check(user.content.some((part) => part.type === "image" && part.url.startsWith("data:image/png;base64,")), "image kept on the user message", user.content.map((part) => part.type));
+    return { answers: done.answers };
+  },
+
+  /** Both providers' skills are listed in every chat (Desktop asks per cwd): a Claude skill mentioned in a GPT chat is Claude's own file. */
+  async claudeSkillInGpt() {
+    const skill = join(HOME, ".claude", "skills", "e2e-probe", "SKILL.md");
+    const listed = (await client.request("skills/list", { cwds: [WORK] })).data[0].skills.find((entry) => entry.name === "claude:e2e-probe");
+    check(listed?.path === skill, "Claude skill listed with its file", listed);
+    const { thread } = await client.request("thread/start", { model: GPT, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    const done = await client.turn(thread.id, `[$claude:e2e-probe](${skill}) Open this skill's file and reply with only its first line that starts with "# ".`, { model: GPT });
+    check(done.answers.join(" ").includes("E2E probe skill"), "GPT read the Claude skill", done.answers);
+    return { answers: done.answers };
+  },
+
+  async codexMcpStreaming() {
+    // codex ≥ 0.154 has no `mcp-server`: CCodex serves the same tools on `codex exec` (registered by `ccodex setup`).
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    const since = client.messages.length;
+    const done = await client.turn(thread.id, `Call the mcp__codex__codex tool with prompt "Reply with the word MCP-OK" and model "${GPT}". Then tell me what it returned.`, {}, 400_000);
+    const streamed = client.messages.slice(since).filter((m) => m.method === "item/completed" && m.params.threadId === thread.id)
+      .map((m) => m.params.item).filter((item) => item.type === "agentMessage" && /Codex/u.test(item.text)).map((item) => item.text.slice(0, 120));
+    const tools = itemsOf((await client.request("thread/read", { threadId: thread.id, includeTurns: true })).thread.turns);
+    check(tools.includes("mcpToolCall"), "mcp tool call item", tools);
+    check(streamed.length > 0, "codex messages streamed into the thread", { answers: done.answers });
+    // The prompt names what codex ran it with (its journal's turn_context; no effort there = the model's default).
+    check(streamed.some((text) => new RegExp(`^◆ CCodex │ Codex MCP prompt · ${GPT}( · \\w+)?\n`, "u").test(text)), "prompt labelled with model and effort", streamed);
+    return { streamed, tools, answers: done.answers };
+  },
+
+  /** Claude's Skill tool shows as stock shows a skill: a read of the skill's SKILL.md, named after it. */
+  async claudeSkillCall() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    const done = await client.turn(thread.id, "Use the Skill tool to load the e2e-probe skill, then reply with just SKILL-OK.");
+    const skill = join(HOME, ".claude", "skills", "e2e-probe", "SKILL.md");
+    const reads = (await client.request("thread/read", { threadId: thread.id, includeTurns: true })).thread.turns.flatMap((turn) => turn.items)
+      .filter((item) => item.type === "commandExecution").flatMap((item) => item.commandActions);
+    check(reads.some((action) => action.type === "read" && action.name === "e2e-probe skill" && action.path === skill), "Skill call shown as a read of its SKILL.md", reads);
+    return { reads, answers: done.answers };
+  },
+
+  async interruptSteerQueue() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    let since = client.messages.length;
+    const { turn } = await client.request("turn/start", { threadId: thread.id, input: text("Use the Bash tool to run `sleep 20`, then reply DONE.") });
+    await client.waitFor("item/started", (p) => p.threadId === thread.id && p.item.type === "commandExecution", 60_000, since);
+    await client.request("turn/interrupt", { threadId: thread.id, turnId: turn.id });
+    const interrupted = await client.waitFor("turn/completed", (p) => p.threadId === thread.id, 60_000, since);
+    check(interrupted.turn.status === "interrupted", "interrupted", interrupted.turn);
+
+    since = client.messages.length;
+    const second = await client.request("turn/start", { threadId: thread.id, input: text("Use the Bash tool to run `sleep 6`, then reply with one short sentence.") });
+    await client.waitFor("item/started", (p) => p.threadId === thread.id && p.item.type === "commandExecution", 60_000, since);
+    await client.request("turn/steer", { threadId: thread.id, expectedTurnId: second.turn.id, input: text("Also include the word ZEBRA in your reply.") });
+    const queued = await client.request("thread/queue/add", { threadId: thread.id, input: text("Reply with the word QUEUED-OK."), clientUserMessageId: "e2e-queue" });
+    const listed = await client.request("thread/queue/list", { threadId: thread.id });
+    await client.waitFor("item/completed", (p) => p.threadId === thread.id && p.item.type === "agentMessage" && /QUEUED-OK/u.test(p.item.text), 180_000, since);
+    const steered = answers(client, thread.id, since).join(" ");
+    check(/ZEBRA/u.test(steered), "steer reached the running turn", steered);
+    const { thread: read } = await client.request("thread/read", { threadId: thread.id, includeTurns: true });
+    check(read.turns[0].status === "interrupted", "interrupted in history", read.turns.map((t) => t.status));
+    state.lifecycle = thread.id;
+    return { queuedId: queued.queuedSubmission.id, listed: listed.data.length, answers: answers(client, thread.id, since), turns: read.turns.map((t) => `${t.status}:${t.items.length}`) };
+  },
+
+  /**
+   * Claude going on after an answer: a long message before more work ends its turn, and a background command's end
+   * wakes Claude in a turn that opened at the answer and stayed working meanwhile. Live turns are history's.
+   */
+  async continuedTurns() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    const shape = (turns) => turns.map((turn) => [turn.id, [...new Map(turn.items.filter((item) => item.type !== "reasoning").map((item) => [item.id, item])).values()]
+      .map((item) => item.type === "agentMessage" ? `agent:${item.text.length}` : item.type)]);
+    const report = await client.turn(thread.id, `${TEST}Write me an explanation of what a mutex is, at least 1200 characters long, as a message. Then, in the same reply, use the Bash tool to run \`echo hi\`. Then reply DONE.`, {}, 240_000, 2);
+    const split = liveTurns(thread.id, 0);
+    const long = shape(split)[0]?.[1].at(-1);
+    check(split.length === 2 && /^agent:\d{3,}$/u.test(long) && Number(long.slice(6)) >= 800, "the long message ends its turn", shape(split));
+    check(split[1].id.endsWith(":continued") && !split[1].items.some((item) => item.type === "userMessage") && /DONE/u.test(report.answers.at(-1)), "the work goes on in a turn with no prompt", shape(split));
+
+    // Like stock's background terminal: the turn ends, the command runs on and completes in that turn; its end wakes
+    // Claude up in a turn of its own.
+    const since = client.messages.length;
+    const watching = client.turn(thread.id, `${TEST}Use the Bash tool with run_in_background set to true to run exactly: sleep 15; echo bg-done. Do not wait for it: reply WATCHING right away. When it finishes, reply FINISHED.`, {}, 240_000, 2);
+    const answered = await client.waitFor("turn/completed", (p) => p.threadId === thread.id, 120_000, since);
+    const command = (p) => p.threadId === thread.id && p.turnId === answered.turn.id && p.item.type === "commandExecution" && p.item.command.includes("bg-done");
+    const open = (await client.request("thread/read", { threadId: thread.id, includeTurns: true })).thread;
+    const running = open.turns.at(-1).items.find((item) => item.type === "commandExecution" && item.command.includes("bg-done"));
+    check(open.status.type === "idle" && open.turns.at(-1).id === answered.turn.id && running?.status === "inProgress", "the turn ends while the command runs on (idle, the command running)", { status: open.status, running });
+    const ended = await client.waitFor("item/completed", command, 60_000, since);
+    check(ended.item.status === "completed" && ended.item.exitCode === 0 && /bg-done/u.test(ended.item.aggregatedOutput ?? ""), "the command completes in its turn with its output", ended.item);
+    const woken = await watching;
+    check(/FINISHED/u.test(woken.answers.at(-1)) && woken.turn.id.endsWith(":continued"), "its end wakes Claude in a turn of its own", { answers: woken.answers, turn: woken.turn.id });
+    const live = shape(liveTurns(thread.id, 0));
+    const history = shape((await client.request("thread/read", { threadId: thread.id, includeTurns: true })).thread.turns);
+    check(JSON.stringify(live) === JSON.stringify(history), "live turns are history's", { live, history });
+
+    // Desktop's "Stop all background terminals" stops Claude's command; Claude stopping one itself shows on the command.
+    const before = client.messages.length;
+    await client.turn(thread.id, `${TEST}Use the Bash tool with run_in_background set to true to run exactly: sleep 118; echo late. Do not wait for it: reply STARTED right away.`, {}, 240_000);
+    check(spawnSync("pgrep", ["-f", "sleep 118"]).status === 0, "the background command runs", {});
+    await client.request("thread/backgroundTerminals/clean", { threadId: thread.id });
+    const cleaned = await client.waitFor("item/completed", (p) => p.threadId === thread.id && p.item.type === "commandExecution" && p.item.command.includes("sleep 118"), 15_000, before);
+    await sleep(3_000);
+    check(cleaned.item.status === "failed" && spawnSync("pgrep", ["-f", "sleep 118"]).status !== 0, "the panel's stop stops the command", cleaned.item);
+    const self = client.messages.length;
+    const stop = await client.turn(thread.id, `${TEST}Use the Bash tool with run_in_background set to true to run exactly: sleep 117. Then stop that background task with the TaskStop tool. Then reply STOPPED.`, {}, 240_000);
+    const interaction = client.messages.slice(self).find((m) => m.method === "item/commandExecution/terminalInteraction" && m.params.threadId === thread.id);
+    const stopItems = (await client.request("thread/read", { threadId: thread.id, includeTurns: true })).thread.turns.find((turn) => turn.id === stop.turn.id).items;
+    check(interaction?.params.stdin === "\u0003" && !stopItems.some((item) => /TaskStop/iu.test(JSON.stringify(item.tool ?? ""))) && spawnSync("pgrep", ["-f", "sleep 117"]).status !== 0,
+      "Claude's TaskStop shows as a Ctrl-C on the command, not as a call", { interaction: interaction?.params, items: stopItems.map((item) => [item.type, item.tool ?? item.status]) });
+    const stopped = { turn: { status: stopItems.find((item) => item.type === "commandExecution")?.status } };
+    return { turns: history, stopped: stopped.turn.status };
+  },
+
+  async compactRollbackManage() {
+    const threadId = state.lifecycle;
+    const since = client.messages.length;
+    await client.request("thread/compact/start", { threadId });
+    await client.waitFor("item/completed", (p) => p.threadId === threadId && p.item.type === "contextCompaction", 180_000, since);
+    await client.waitFor("turn/completed", (p) => p.threadId === threadId, 60_000, since);
+    const before = (await client.request("thread/read", { threadId, includeTurns: true })).thread.turns.length;
+    const after = await client.turn(threadId, "What word did I ask you to include earlier? One word.");
+    check(after.answers.join(" ").toUpperCase().includes("ZEBRA"), "context survives /compact", after.answers);
+    await client.request("thread/rollback", { threadId, numTurns: 1 });
+    const rolled = (await client.request("thread/read", { threadId, includeTurns: true })).thread.turns.length;
+    check(rolled === before, "rollback drops the last turn", { before, rolled });
+    await client.request("thread/name/set", { threadId, name: "Manual name" });
+    check((await client.request("thread/read", { threadId })).thread.name === "Manual name", "manual rename");
+    await client.request("thread/archive", { threadId });
+    const archived = (await client.request("thread/list", { limit: 100, archived: true })).data.some((row) => row.id === threadId);
+    await client.request("thread/unarchive", { threadId });
+    const back = (await client.request("thread/list", { limit: 100 })).data.some((row) => row.id === threadId);
+    check(archived && back, "archive round trip", { archived, back });
+    await client.request("thread/delete", { threadId });
+    const gone = !(await client.request("thread/list", { limit: 100 })).data.some((row) => row.id === threadId);
+    check(gone, "deleted");
+    return { before, rolled };
+  },
+
+  async askUserQuestion() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK });
+    const previous = client.onRequest;
+    client.onRequest = (message) => message.method === "item/tool/requestUserInput"
+      ? { answers: Object.fromEntries(message.params.questions.map((q) => [q.id, { answers: [q.options?.[1]?.label ?? "Blue"] }])) }
+      : previous(message);
+    client.asked.length = 0;
+    const done = await client.turn(thread.id, "Use the AskUserQuestion tool to ask me to pick a color with the options Red and Blue. Then tell me which one I picked.");
+    client.onRequest = previous;
+    const asked = client.asked.filter((m) => m.method === "item/tool/requestUserInput");
+    check(asked.length === 1, "question asked", client.asked.map((m) => m.method));
+    check(/blue/iu.test(done.answers.join(" ")), "answer reached Claude", done.answers);
+    return { question: asked[0].params.questions[0], answers: done.answers };
+  },
+
+  /** Stock plan mode: the plan turn ends with a plan item (leaving plan mode asks nothing); Desktop's "Yes, implement
+   *  this plan" (collaboration mode back to default, then the plan) runs it with the full access the chat had. */
+  async planMode() {
+    const dir = join(WORK, "plan");
+    const greet = join(dir, "greet.py");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(greet, "print(\"Hello\")\n");
+    const mode = (name) => ({ mode: name, settings: { model: state.haiku, reasoning_effort: null, developer_instructions: null } });
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: dir, approvalPolicy: "never", sandbox: "danger-full-access" });
+    client.asked.length = 0;
+    const since = client.messages.length;
+    const planned = await client.turn(thread.id, "Plan how to add a --verbose flag to greet.py (when set, print verbose on to stderr). Keep the plan to 3 short steps.", { collaborationMode: mode("plan") });
+    const plan = client.messages.slice(since).find((m) => m.method === "item/completed" && m.params.threadId === thread.id && m.params.item.type === "plan")?.params.item;
+    check(planned.turn.status === "completed" && plan?.text, "the plan turn completed with a plan item", itemsOf(liveTurns(thread.id, since)));
+    check(!client.asked.length, "leaving plan mode asks nothing", client.asked.map((m) => `${m.method} ${m.params.command ?? ""}`));
+    check(!readFileSync(greet, "utf8").includes("verbose"), "nothing implemented before the plan is accepted");
+    // Claude plans a Haiku chat on Sonnet and its transcript names only that: after a restart the chat is still on Haiku.
+    const transcript = join(HOME, ".claude", "projects", dir.replace(/[^a-zA-Z0-9]/gu, "-"), `${thread.id}.jsonl`);
+    const plannedOn = [...new Set(readFileSync(transcript, "utf8").trim().split("\n").map((line) => JSON.parse(line).message?.model).filter(Boolean))];
+    client.close();
+    await daemon("restart");
+    client = await Client.connect();
+    const resumed = await client.request("thread/resume", { threadId: thread.id });
+    check(resumed.model === state.haiku && resumed.thread.model === state.haiku, "after a restart the chat keeps its model", { model: resumed.model, plannedOn });
+    await client.request("thread/settings/update", { threadId: thread.id, collaborationMode: mode("default") });
+    const done = await client.turn(thread.id, `PLEASE IMPLEMENT THIS PLAN:\n${plan.text}`, { turnTrigger: "plan_implementation", collaborationMode: mode("default") });
+    check(readFileSync(greet, "utf8").includes("verbose"), "the accepted plan was implemented", done.answers);
+    check(!client.asked.length, "implemented with the chat's full access", client.asked.map((m) => `${m.method} ${m.params.command ?? ""}`));
+    check((await items(thread.id)).some((item) => item.type === "plan" && item.id === plan.id), "history shows the plan");
+    return { plan: plan.text.slice(0, 300), planAnswers: planned.answers, plannedOn, answers: done.answers, greet: readFileSync(greet, "utf8") };
+  },
+
+  /** A session started with the claude CLI shows up by itself (the image has no ~/.claude/projects yet), continues
+   *  through CCodex, and the CLI sees what was said there. */
+  async cliSession() {
+    const claude = join(dirname(require.resolve("@anthropic-ai/claude-agent-sdk-linux-x64/package.json")), "claude");
+    const cli = (...args) => {
+      const run = spawnSync(claude, ["-p", ...args, "--model", "haiku", "--output-format", "json"], { cwd: WORK, encoding: "utf8", timeout: 120_000 });
+      check(run.status === 0, "claude -p ran", run.stderr);
+      return JSON.parse(run.stdout);
+    };
+    const since = client.messages.length;
+    const sessionId = cli("Remember the code word KIWI-42. Reply with just OK.").session_id;
+    await client.waitFor("thread/started", (params) => params.thread.id === sessionId, 30_000, since);
+    await client.request("thread/resume", { threadId: sessionId });
+    const done = await client.turn(sessionId, "What code word did I ask you to remember? Reply with just the word.");
+    check(done.answers.join(" ").includes("KIWI-42"), "CCodex continued the CLI session", done.answers);
+    const back = cli("--resume", sessionId, "Quote my previous question to you verbatim.");
+    check(back.session_id === sessionId && /code word/iu.test(back.result), "the CLI sees the CCodex turn", back);
+    const users = itemsOf((await client.request("thread/read", { threadId: sessionId, includeTurns: true })).thread.turns).filter((item) => item.startsWith("user:"));
+    check(users.length === 3, "all three turns in the thread", users);
+    return { sessionId, answers: done.answers, cli: back.result };
+  },
+
+  /** Smoke: the plain `codex` TUI (delegated to the installed codex) runs a gpt turn. */
+  async tui() {
+    const tmux = (...args) => execFileSync("tmux", args, { encoding: "utf8" });
+    // The pane outlives the TUI: an exit shows its last screen and status.
+    tmux("new-session", "-d", "-s", "tui", "-x", "160", "-y", "45", "-c", WORK, `codex -m ${GPT}; echo "TUI EXITED $?"; sleep 600`);
+    let screen = "";
+    let sent = false;
+    for (let attempt = 0; attempt < 60 && !screen.includes("TUI-OK."); attempt += 1) {
+      await sleep(2000);
+      screen = tmux("capture-pane", "-p", "-t", "tui");
+      if (/trust/iu.test(screen) && !sent) tmux("send-keys", "-t", "tui", "Enter");
+      else if (!sent && /›|context left|send/iu.test(screen)) {
+        tmux("send-keys", "-t", "tui", "-l", "Reply with exactly: TUI-OK.");
+        await sleep(500);
+        tmux("send-keys", "-t", "tui", "Enter");
+        sent = true;
+      }
+    }
+    tmux("kill-server");
+    check(screen.includes("TUI-OK."), "TUI answered", screen);
+    return { screen: screen.split("\n").filter((line) => line.trim()).slice(-12) };
+  },
+
+  /** Claude processes nobody uses go like stock's idle threads, never taking work that still runs with them. */
+  async idleUnload() {
+    client.close();
+    await daemon("restart", { ...process.env, CCODEX_E2E_IDLE_MS: "8000" });
+    client = await Client.connect();
+    try {
+      const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+      // A background command that computes for 25 s (3× the idle wait) finishes; one that sleeps is ended once idle.
+      // Either runs on past its turn (stock's background terminal); its end wakes Claude up in a turn of its own.
+      let at = Date.now();
+      await client.turn(thread.id, "Use the Bash tool with run_in_background set to true to run exactly: timeout 25 sh -c 'while :; do :; done'; echo busy-done > /home/node/work/busy.txt\nThen reply STARTED at once, without waiting for it.", {}, 240_000, 2);
+      const busySeconds = (Date.now() - at) / 1_000;
+      check(existsSync(join(WORK, "busy.txt")) && busySeconds >= 25, "a working background command runs to its end", busySeconds);
+      at = Date.now();
+      const hungSince = client.messages.length;
+      await client.turn(thread.id, "Use the Bash tool to run exactly: nohup sleep 600 >/dev/null 2>&1 & echo $! > /home/node/work/detached.pid\nThen use the Bash tool with run_in_background set to true to run exactly: sleep 600; echo slept > /home/node/work/hung.txt\nThen reply STARTED at once, without waiting for it.");
+      await client.waitFor("item/completed", (p) => p.threadId === thread.id && p.item.type === "commandExecution" && /sleep 600;/u.test(p.item.command), 120_000, hungSince);
+      const hungSeconds = (Date.now() - at) / 1_000;
+      check(!existsSync(join(WORK, "hung.txt")) && hungSeconds < 120, "a hung background command is ended", hungSeconds);
+      // Stopped the way Claude's stop control does: Claude does not take it for a failure to retry.
+      await sleep(10_000);
+      const sleeps = (await items(thread.id)).filter((item) => item.type === "commandExecution" && /sleep 600;/u.test(item.command));
+      check(sleeps.length === 1, "the stopped command is not run again", sleeps.map((item) => item.command));
+      const detached = Number(readFileSync(join(WORK, "detached.pid"), "utf8"));
+
+      // Nobody subscribed and nothing to do: unloaded, the command it detached lives on.
+      const since = client.messages.length;
+      await client.request("thread/unsubscribe", { threadId: thread.id });
+      await client.waitFor("thread/closed", (p) => p.threadId === thread.id, 60_000, since);
+      const status = (await client.request("thread/read", { threadId: thread.id })).thread.status.type;
+      check(status === "notLoaded", "unloaded", status);
+      check((() => { try { return process.kill(detached, 0); } catch { return false; } })(), "detached command survives");
+      process.kill(detached, "SIGKILL");
+      await client.request("thread/resume", { threadId: thread.id });
+      const again = await client.turn(thread.id, "Which file was the `timeout 25` command to write? Reply with its file name only.");
+      check(/busy\.txt/u.test(again.answers.join(" ")), "resumed with its history", again.answers);
+
+      // Still open (subscribed) and quiet: only its process goes; the chat stays loaded and answers with its history.
+      const openSince = client.messages.length;
+      for (let waited = 0; claudeRunning(thread.id); waited += 1_000) {
+        check(waited < 60_000, "a quiet chat still open loses its process");
+        await sleep(1_000);
+      }
+      check(!client.messages.slice(openSince).some((m) => m.method === "thread/closed" && m.params.threadId === thread.id), "a chat still open is not unloaded");
+      check((await client.request("thread/loaded/list", {})).data.includes(thread.id), "it stays loaded");
+      const later = await client.turn(thread.id, "Which file was the `timeout 25` command to write? Reply with its file name only.");
+      check(/busy\.txt/u.test(later.answers.join(" ")), "the next prompt starts it again, with its history", later.answers);
+
+      // A session cron keeps its chat loaded.
+      const { thread: cron } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+      await client.turn(cron.id, "Use the CronCreate tool (load it with ToolSearch first if needed) to schedule the prompt 'Reply with the word TICK.' to run once per hour. Then reply DONE.");
+      check(/CronCreate/u.test(JSON.stringify(await items(cron.id))), "cron created", await items(cron.id));
+      const cronSince = client.messages.length;
+      await client.request("thread/unsubscribe", { threadId: cron.id });
+      await sleep(20_000);
+      check(!client.messages.slice(cronSince).some((m) => m.method === "thread/closed" && m.params.threadId === cron.id), "a chat with a cron stays loaded");
+      return { busySeconds, hungSeconds };
+    } finally {
+      client.close();
+      await daemon("restart");
+      client = await Client.connect();
+    }
+  },
+
+  /** At most CCODEX_E2E_MAX_PROCESSES Claude processes: the open chat used longest ago loses its own, and keeps its history. */
+  async processCap() {
+    client.close();
+    await daemon("restart", { ...process.env, CCODEX_E2E_MAX_PROCESSES: "2" });
+    client = await Client.connect();
+    try {
+      const chats = [];
+      for (const word of ["ALPHA", "BRAVO", "CHARLIE"]) {
+        const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+        await client.turn(thread.id, `Remember the word ${word}. Reply only: OK.`);
+        chats.push(thread.id);
+      }
+      for (let waited = 0; claudeRunning(chats[0]); waited += 1_000) {
+        check(waited < 90_000, "the third process closes the first chat's", chats.map(claudeRunning));
+        await sleep(1_000);
+      }
+      check(claudeRunning(chats[1]) && claudeRunning(chats[2]), "the chats used later keep theirs", chats.map(claudeRunning));
+      const said = await client.turn(chats[0], "/cc");
+      check(/at most 2\) and this chat was used longest ago/u.test(said.answers.join(" ")), "/cc tells why", said.answers);
+      const again = await client.turn(chats[0], "Which word did I ask you to remember? Reply with it only.");
+      check(again.answers.join(" ").includes("ALPHA"), "it answers with its history", again.answers);
+      return { closed: chats[0] };
+    } finally {
+      client.close();
+      await daemon("restart");
+      client = await Client.connect();
+    }
+  },
+
+  async restartDeterminism() {
+    const ids = [state.claude, state.switched].filter(Boolean);
+    const read = async () => Promise.all(ids.map(async (threadId) => {
+      const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+      return JSON.stringify({ ...thread, status: null, updatedAt: null, recencyAt: null });
+    }));
+    const before = await read();
+    client.close();
+    const restart = await daemon("restart");
+    client = await Client.connect();
+    const after = await read();
+    const diffs = before.flatMap((value, index) => {
+      if (value === after[index]) return [];
+      let at = 0;
+      while (value[at] === after[index][at]) at += 1;
+      return [{ before: value.slice(Math.max(0, at - 150), at + 150), after: after[index].slice(Math.max(0, at - 150), at + 150) }];
+    });
+    check(!diffs.length, "identical after restart", diffs);
+    return { restart: restart.slice(0, 200), threads: ids.length };
+  },
+
+  /** A plain Codex app-server on the public socket (Codex 0.158+ listens under /tmp/codex-daemon-<uid>/ behind a link there): the restart takes over. */
+  async stockDaemonTakeover() {
+    client.close();
+    await daemon("stop");
+    const stock = spawn(join(HOME, ".npm-global", "bin", "codex"), ["app-server", "--listen", `unix://${SOCKET}`], { detached: true, stdio: "ignore" });
+    for (let attempt = 0; !existsSync(SOCKET) && attempt < 100; attempt += 1) await sleep(100);
+    const linked = lstatSync(SOCKET).isSymbolicLink() ? readlinkSync(SOCKET) : "not a link";
+    const restart = await daemon("restart");
+    client = await Client.connect();
+    check(stock.exitCode !== null || stock.signalCode !== null, "the plain Codex app-server stopped", { linked, restart });
+    const { thread } = await client.request("thread/start", { model: GPT, cwd: WORK });
+    const reply = await client.turn(thread.id, "Reply with exactly: TAKEOVER-OK");
+    check(reply.answers.some((answer) => answer.includes("TAKEOVER-OK")), "GPT turn after the takeover", reply.answers);
+    return { linked, restart: restart.slice(0, 120), answers: reply.answers };
+  },
+
+  /**
+   * Chats in every state CCodex keeps (plan mode, goals, effort, speed, model, switched providers, a side chat) look
+   * the same after their Claude session was unloaded for idleness and after a daemon restart.
+   */
+  async restartMatrix() {
+    client.close();
+    await daemon("restart", { ...process.env, CCODEX_E2E_IDLE_MS: "8000" });
+    client = await Client.connect();
+    try {
+      const full = { approvalPolicy: "never", sandbox: "danger-full-access" };
+      const mode = (name, model) => ({ mode: name, settings: { model, reasoning_effort: null, developer_instructions: null } });
+      const start = async (model, extra = {}) => (await client.request("thread/start", { model, cwd: WORK, ...extra })).thread.id;
+      const chats = {};
+      const ok = "Reply only with OK.";
+      chats.haiku = await start(state.haiku);
+      await client.turn(chats.haiku, ok);
+      chats.plan = await start(state.haiku, full);
+      await client.turn(chats.plan, "Plan how to print hello in Python. One short step.", { collaborationMode: mode("plan", state.haiku) });
+      chats.ultra = await start(state.opus);
+      await client.turn(chats.ultra, ok, { effort: "ultra" });
+      chats.fast = await start(state.opus);
+      await client.turn(chats.fast, ok, { serviceTier: "fast" });
+      chats.gptPlan = await start(GPT, full);
+      await client.turn(chats.gptPlan, "Plan how to print hello in Python. One short step.", { model: GPT, collaborationMode: mode("plan", GPT) });
+      chats.gptToClaude = await start(GPT);
+      await client.turn(chats.gptToClaude, ok, { model: GPT });
+      await client.turn(chats.gptToClaude, ok, { model: state.haiku }, 400_000);
+      chats.claudeToGpt = await start(state.haiku);
+      await client.turn(chats.claudeToGpt, ok);
+      await client.turn(chats.claudeToGpt, ok, { model: GPT }, 400_000);
+      const long = `Files ${WORK}/matrix/a1.txt through ${WORK}/matrix/a40.txt exist, each containing its number. Create exactly ONE file per turn, then end the turn.`;
+      const goalTurn = async (threadId, objective) => {
+        const since = client.messages.length;
+        await client.request("thread/goal/set", { threadId, objective, status: "active" });
+        return client.waitFor("turn/started", (p) => p.threadId === threadId, 120_000, since);
+      };
+      chats.goalPaused = await start(state.haiku, full);
+      await client.turn(chats.goalPaused, ok);
+      const paused = await goalTurn(chats.goalPaused, long);
+      await client.waitFor("item/completed", (p) => p.threadId === chats.goalPaused && p.turnId === paused.turn.id && wrote(p.item), 120_000);
+      await client.request("thread/goal/set", { threadId: chats.goalPaused, status: "paused" });
+      chats.goalActive = await start(state.haiku, full);
+      await client.turn(chats.goalActive, ok);
+      const goal = await goalTurn(chats.goalActive, long.replaceAll("/a", "/b"));
+      await client.request("turn/interrupt", { threadId: chats.goalActive, turnId: goal.turn.id });
+      const { thread: side } = await client.request("thread/fork", { threadId: chats.haiku, ephemeral: true, excludeTurns: true, threadSource: "user" });
+      chats.side = side.id;
+      await client.turn(chats.side, ok);
+      // Settled: no turn runs, every chat named.
+      await waitUntil(async () => {
+        const rows = (await client.request("thread/list", { limit: 100 })).data;
+        const statuses = await Promise.all(Object.values(chats).map(async (threadId) => (await client.request("thread/read", { threadId })).thread.status.type));
+        state.matrixSettle = { unnamed: Object.entries(chats).filter(([name, id]) => name !== "side" && !rows.find((row) => row.id === id)?.name).map(([name]) => name), statuses };
+        return !state.matrixSettle.unnamed.length && !statuses.includes("active");
+      }, 120_000, "chats settled").catch((error) => { throw Object.assign(error, { detail: state.matrixSettle }); });
+
+      // An effort not chosen shows as the model's default: the same to the user.
+      const defaults = Object.fromEntries((await client.request("model/list", {})).data.map((model) => [model.id, model.defaultReasoningEffort]));
+      const shown = (effort, model) => effort ?? defaults[model] ?? null;
+      const capture = async () => {
+        const rows = (await client.request("thread/list", { limit: 100 })).data;
+        const out = {};
+        for (const [name, threadId] of Object.entries(chats)) {
+          const failed = (error) => ({ error: error.message });
+          const resume = await client.request("thread/resume", { threadId }).then((r) => ({
+            model: r.model, modelProvider: r.modelProvider, effort: shown(r.reasoningEffort, r.model), serviceTier: r.serviceTier, approvalPolicy: r.approvalPolicy,
+            approvalsReviewer: r.approvalsReviewer, sandbox: r.sandbox, profile: r.activePermissionProfile, collaborationMode: r.collaborationMode && { ...r.collaborationMode, settings: { ...r.collaborationMode.settings, reasoning_effort: shown(r.collaborationMode.settings.reasoning_effort, r.model) } },
+            threadModel: r.thread.model, threadEffort: shown(r.thread.reasoningEffort, r.thread.model), cwd: r.cwd,
+          }), failed);
+          const goalNow = await client.request("thread/goal/get", { threadId }).then((g) => g.goal && { status: g.goal.status, objective: g.goal.objective.slice(0, 50) }, failed);
+          const turns = await client.request("thread/read", { threadId, includeTurns: true })
+            .then(({ thread }) => thread.turns.map((turn) => `${turn.id} ${turn.status} ${turn.items.map((item) => item.type).join(",")}`), failed);
+          const row = rows.find((entry) => entry.id === threadId);
+          out[name] = { resume, goal: goalNow, turns, row: row && { name: row.name, preview: row.preview, model: row.model, modelProvider: row.modelProvider, effort: shown(row.reasoningEffort, row.model) } };
+        }
+        // The settings a client sees next: what the gateway tells it after a resume.
+        return out;
+      };
+      const diff = (before, after, path = "") => {
+        if (JSON.stringify(before) === JSON.stringify(after)) return [];
+        if (before && after && typeof before === "object" && typeof after === "object" && !Array.isArray(before)) {
+          return [...new Set([...Object.keys(before), ...Object.keys(after)])].flatMap((key) => diff(before[key], after[key], `${path}.${key}`));
+        }
+        return [{ path, before, after }];
+      };
+      const baseline = await capture();
+      // Idle unload: nobody subscribed, the chat is closed (Claude's process and session go).
+      const since = client.messages.length;
+      for (const threadId of Object.values(chats)) await client.request("thread/unsubscribe", { threadId }).catch(() => undefined);
+      const closed = {};
+      for (const [name, threadId] of Object.entries(chats)) {
+        closed[name] = await client.waitFor("thread/closed", (p) => p.threadId === threadId, 30_000, since).then(() => true, () => false);
+      }
+      const unloaded = await capture();
+      client.close();
+      await daemon("restart");
+      client = await Client.connect();
+      const restarted = await capture();
+      await client.request("thread/goal/clear", { threadId: chats.goalActive }).catch(() => undefined);
+      // Each chat still answers with the settings it came back with.
+      const answered = {};
+      for (const [name, threadId] of Object.entries(chats)) {
+        if (name === "side" || name.startsWith("goal")) continue;
+        answered[name] = await client.turn(threadId, ok).then((done) => `${done.turn.status}: ${done.answers.join(" ").slice(0, 40)}`, (error) => error.message);
+      }
+      // Stock's own: a side chat is ephemeral (gone with the daemon), a GPT chat resumed without settings gets the config's sandbox.
+      const ours = (diffs) => diffs.filter((entry) => !/^\.(?:side|gptPlan)\./u.test(entry.path));
+      const report = { closed, answered, idleUnload: diff(baseline, unloaded), restart: diff(baseline, restarted) };
+      writeFileSync("/out/restartMatrix.json", JSON.stringify({ chats, baseline, unloaded, restarted, ...report }, null, 2));
+      check(Object.values(answered).every((said) => said.startsWith("completed")), "every chat answers after the restart", answered);
+      check(!ours(report.idleUnload).length && !ours(report.restart).length, "every chat the same after an idle unload and a restart", report);
+      return report;
+    } finally {
+      client.close();
+      await daemon("restart");
+      client = await Client.connect();
+    }
+  },
+
+  /**
+   * Switched chats (claude → gpt, gpt → claude): every place a frame to the client names the chat's public id outside a
+   * plain id field. The public id there was the current backend's id (paths, cursors, text) before the rewrite.
+   */
+  async idLeaks() {
+    const since = client.messages.length;
+    const start = async (model) => (await client.request("thread/start", { model, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
+    const toGpt = await start(state.haiku);
+    await client.turn(toGpt, "Reply only with OK.");
+    await client.turn(toGpt, "Reply only with OK.", { model: GPT }, 400_000);
+    await client.turn(toGpt, `${TEST}Run this shell command and quote its output verbatim: echo "thread=$CODEX_THREAD_ID"; ls ~/.codex/sessions/*/*/*/ | tail -2`, { model: GPT });
+    await client.turn(toGpt, `${TEST}Generate an image of a small red square with your image generation tool.`, { model: GPT }, 300_000).catch(() => undefined);
+    const toClaude = await start(GPT);
+    await client.turn(toClaude, "Reply only with OK.", { model: GPT });
+    await client.turn(toClaude, "Reply only with OK.", { model: state.haiku }, 400_000);
+    await client.turn(toClaude, `${TEST}Use the Bash tool with run_in_background set to true to run exactly: echo bg-leak. Then reply with the exact output file path its result names.`, {}, 240_000, 1);
+    await sleep(5_000);
+    const meta = JSON.parse(readFileSync(join(HOME, ".ccodex", "state", "meta.json"), "utf8"));
+    const fresh = await Client.connect();
+    for (const threadId of [toGpt, toClaude]) {
+      const resumed = await fresh.request("thread/resume", { threadId });
+      await fresh.request("thread/read", { threadId, includeTurns: true });
+      const turns = [];
+      for (let cursor = resumed.turnsBackwardsCursor; cursor;) {
+        const page = await fresh.request("thread/turns/list", { threadId, cursor, limit: 1, sortDirection: "desc", itemsView: "notLoaded" });
+        turns.push(...page.data);
+        cursor = page.nextCursor;
+      }
+      for (const turn of turns) await fresh.request("thread/items/list", { threadId, turnId: turn.id, cursor: resumed.itemsBackwardsCursor, limit: 100, sortDirection: "desc" });
+      const found = await fresh.request("thread/searchOccurrences", { threadId, searchTerm: "OK", limit: 50 });
+      for (const hit of found.data.slice(0, 3)) await fresh.request("thread/turns/list", { threadId, cursor: hit.turnCursor, limit: 1, sortDirection: "desc", itemsView: "full" });
+    }
+    await fresh.request("thread/list", { limit: 100 });
+    await fresh.request("thread/search", { searchTerm: "OK", limit: 50 });
+    const PLAIN = new Set(["id", "threadId", "conversationId", "parentThreadId", "forkedFromId", "sessionId", "receiverThreadIds", "senderThreadId", "agentThreadId"]);
+    const ids = new Map([toGpt, toClaude].map((id) => [id, meta.lineages[id].at(-1).threadId]));
+    const hits = new Map();
+    const walk = (value, path, method) => {
+      if (typeof value === "string") {
+        for (const [publicId, backend] of ids) {
+          if (!value.includes(publicId) || PLAIN.has(path.at(-1)) || (PLAIN.has(path.at(-2)) && typeof path.at(-1) === "number")) continue;
+          const at = value.indexOf(publicId);
+          const paths = [...value.matchAll(/(?:~|\/)[^\s"'`)\]]+/gu)].map((match) => match[0]).filter((candidate) => candidate.includes(publicId));
+          const broken = paths.filter((candidate) => { const real = candidate.replace(/^~/u, HOME); return !existsSync(real) && existsSync(real.replaceAll(publicId, backend)); });
+          const key = `${method} ${path.map((part) => typeof part === "number" ? "[]" : part).join(".")} ${publicId === toGpt ? "claude→gpt" : "gpt→claude"}`;
+          if (!hits.has(key)) hits.set(key, { key, count: 0, snippet: value.slice(Math.max(0, at - 120), at + 80), broken });
+          const hit = hits.get(key);
+          hit.count += 1;
+          hit.broken = [...new Set([...hit.broken, ...broken])];
+        }
+      } else if (value && typeof value === "object") {
+        for (const [key, child] of Object.entries(value)) walk(child, [...path, Array.isArray(value) ? Number(key) : key], method);
+      }
+    };
+    for (const target of [client, fresh]) {
+      for (const message of target === client ? client.messages.slice(since) : fresh.messages) walk(message, [], message.method ?? `${target.sent.get(message.id)} response`);
+    }
+    fresh.close();
+    const report = { toGpt: [toGpt, ids.get(toGpt)], toClaude: [toClaude, ids.get(toClaude)], hits: [...hits.values()] };
+    writeFileSync("/out/idLeaks.json", JSON.stringify(report, null, 2));
+    check(!report.hits.some((hit) => hit.broken.length), "no path a client gets names the public id in place of a backend's", report.hits.filter((hit) => hit.broken.length));
+    return report;
+  },
+
+  /** 0.4 → 0.5 on copies of a real install mounted at /mig (experiments/…/migration_e2e.sh prepares them). */
+  async migration() {
+    if (!existsSync("/mig")) return { skipped: "no /mig data" };
+    client.close();
+    await daemon("stop");
+    // Earlier scenarios' stock databases go first: their WAL files would apply to the copied ones.
+    execFileSync("sh", ["-c", "rm -f ~/.codex/*.sqlite* && cp -r /mig/claude/projects ~/.claude/ && cp -r /mig/codex/. ~/.codex/ && mkdir -p ~/.ccodex/state && cp /mig/state04/*.sqlite ~/.ccodex/state/"]);
+    const migrated = execFileSync("node", [join(PACKAGE, "scripts", "migrate-0.4-to-0.5.mjs")], { encoding: "utf8" });
+    await daemon("start");
+    client = await Client.connect();
+    const meta = JSON.parse(readFileSync(join(HOME, ".ccodex", "state", "meta.json"), "utf8"));
+    const transcriptPaths = new Map(readdirSync(join(HOME, ".claude", "projects")).flatMap((directory) => readdirSync(join(HOME, ".claude", "projects", directory))
+      .filter((file) => file.endsWith(".jsonl")).map((file) => [file.slice(0, -6), join(HOME, ".claude", "projects", directory, file)])));
+    const transcripts = new Set(transcriptPaths.keys());
+    const { DatabaseSync } = await import("node:sqlite");
+    const stock = new DatabaseSync(join(HOME, ".codex", "state_5.sqlite"), { readOnly: true });
+    const stockRow = (id) => stock.prepare("select archived from threads where id = ?").get(id);
+    const exists = (segment) => segment.provider === "codex" ? Boolean(stockRow(segment.threadId)) : transcripts.has(segment.threadId);
+    const isArchived = (segment) => segment.provider === "codex" ? stockRow(segment.threadId).archived === 1 : meta.archived.includes(segment.threadId);
+
+    const list = async () => {
+      const rows = new Map();
+      for (const archived of [false, true]) {
+        let cursor = null;
+        do {
+          const page = await client.request("thread/list", { limit: 100, cursor, archived });
+          for (const thread of page.data) rows.set(thread.id, { ...thread, archived });
+          cursor = page.nextCursor;
+        } while (cursor);
+      }
+      return rows;
+    };
+    const rows = await list();
+    const lineages = Object.entries(meta.lineages);
+    const rowOf = (publicId, segments) => segments.find((segment) => segment.threadId === publicId) ?? segments[0];
+    const rowIds = new Set(lineages.map(([publicId, segments]) => rowOf(publicId, segments).threadId));
+    const hidden = lineages.flatMap(([, segments]) => segments.map((segment) => segment.threadId)).filter((id) => !rowIds.has(id));
+    check(!hidden.some((id) => rows.has(id)), "hidden segments are not listed", hidden.filter((id) => rows.has(id)));
+
+    const problems = [];
+    const readable = [];
+    for (const [publicId, segments] of lineages) {
+      const current = segments.at(-1);
+      if (!exists(rowOf(publicId, segments)) || !exists(current)) continue;
+      const row = rows.get(publicId);
+      if (!row) { problems.push({ publicId, problem: "not listed" }); continue; }
+      if (row.archived !== isArchived(current)) problems.push({ publicId, problem: `archived ${row.archived}, current backend ${isArchived(current)}` });
+      try {
+        const { thread } = await client.request("thread/read", { threadId: publicId, includeTurns: true });
+        // Switches to Claude show a synthetic compaction turn (switches to gpt have it in the stock thread).
+        const switches = thread.turns.filter((turn) => turn.id.startsWith("switch:")).length;
+        const toClaude = segments.filter((segment, index) => index > 0 && segment.provider === "claude").length;
+        if (!thread.turns.length || switches !== toClaude) problems.push({ publicId, problem: `turns ${thread.turns.length}, switches ${switches}/${toClaude}` });
+        else readable.push({ publicId, segments: segments.length, turns: thread.turns.length, size: JSON.stringify(thread).length, name: thread.name, model: thread.model });
+      } catch (error) {
+        problems.push({ publicId, problem: error.message });
+      }
+    }
+    check(!problems.length, "migrated lineages list and read", problems);
+    // Every visible 0.4 Claude thread that still has a transcript is listed under its session id (lineage parts aside);
+    // no 0.4 thread id is.
+    const backends = new Set(lineages.flatMap(([, segments]) => segments.map((segment) => segment.threadId)));
+    const state04 = new DatabaseSync("/mig/state04/state.sqlite", { readOnly: true });
+    const threads04 = state04.prepare(`select id, claude_session_id session from threads where deletion_pending = 0
+      and json_extract(thread_json, '$.parentThreadId') is null`).all();
+    const missing = threads04.filter(({ session }) => transcripts.has(session) && !(backends.has(session) && !meta.lineages[session]) && !rows.has(session));
+    check(!missing.length, "0.4 Claude threads listed", missing.slice(0, 20));
+    const oldIds = threads04.filter(({ id, session }) => id !== session && rows.has(id)).map(({ id }) => id);
+    check(!oldIds.length, "no 0.4 thread id is listed", oldIds.slice(0, 20));
+    // 0.4 side chats (/btw forks) are no chats: only their sessions are there, archived.
+    const sides = new DatabaseSync("/mig/state04/handoffs.sqlite", { readOnly: true }).prepare("select public_thread_id id from side_threads").all()
+      .map(({ id }) => threads04.find((thread) => thread.id === id)?.session).filter((session) => transcripts.has(session));
+    const listedSides = sides.filter((session) => !rows.get(session)?.archived);
+    check(sides.length > 0 && !listedSides.length, "0.4 side chats are not listed", { sides: sides.length, listed: listedSides });
+    check(!existsSync(join(HOME, ".ccodex", "state", "state.sqlite")) && existsSync(join(HOME, ".ccodex.0.4-backup", "state.sqlite"))
+      && existsSync(join(HOME, ".ccodex.0.4-backup", "handoffs.sqlite")), "0.4's databases moved to ~/.ccodex.0.4-backup");
+
+    // Plain migrated Claude threads (no lineage), smallest first: a turn continues one.
+    const copied = new Set(readdirSync("/mig/claude/projects").flatMap((directory) => readdirSync(join("/mig/claude/projects", directory))).map((file) => file.replace(/\.jsonl$/, "")));
+    const plain = [...new Set(threads04.map(({ session }) => session))].filter((session) => rows.has(session) && !rows.get(session).archived && !backends.has(session))
+      .map((session) => ({ session, size: statSync(transcriptPaths.get(session)).size }))
+      .sort((a, b) => a.size - b.size);
+    const alias = plain.find(({ session }) => copied.has(session));
+    const { thread: before } = await client.request("thread/read", { threadId: alias.session, includeTurns: true });
+    await client.request("thread/resume", { threadId: alias.session });
+    execFileSync("mkdir", ["-p", before.cwd]);
+    const reply = await client.turn(alias.session, "Reply with exactly: MIGRATED-OK", { model: state.haiku });
+    check(reply.answers.some((answer) => answer.includes("MIGRATED-OK")), "turn on a migrated thread", reply.answers);
+    const { thread: after } = await client.request("thread/read", { threadId: alias.session, includeTurns: true });
+    check(after.turns.length === before.turns.length + 1, "the turn is in its history", { before: before.turns.length, after: after.turns.length });
+
+    // A thread whose transcript Claude had deleted is back as text, and Claude continues it knowing what was said.
+    const restoredThreads = plain.filter(({ session }) => !copied.has(session));
+    check(restoredThreads.length > 0, "restored threads list and read", migrated.split("\n").filter((line) => line.startsWith("restored")));
+    const small = restoredThreads[0].session;
+    await client.request("thread/resume", { threadId: small });
+    const { thread: old } = await client.request("thread/read", { threadId: small, includeTurns: true });
+    const first = old.turns.flatMap((turn) => turn.items).find((item) => item.type === "userMessage").content[0].text.trim().slice(0, 40);
+    execFileSync("mkdir", ["-p", old.cwd]);
+    const recall = await client.turn(small, "Quote verbatim the very first message I sent in this chat, nothing else.", { model: state.haiku });
+    check(recall.answers.some((answer) => answer.includes(first.slice(0, 20))), "a restored thread continues with its history", { first, answers: recall.answers });
+
+    client.close();
+    await daemon("restart");
+    client = await Client.connect();
+    const again = await list();
+    const key = (map) => [...map.values()].map((thread) => `${thread.id}:${thread.archived}:${thread.name}`).sort().join("\n");
+    check(key(again) === key(rows), "same list after restart", { before: rows.size, after: again.size });
+    return { restored: small, migrated: migrated.split("\n").filter((line) => !line.startsWith("fork ")), listed: rows.size, readable: readable.length, alias: alias.session, sides: sides.length };
+  },
+
+  /**
+   * Codex's own installer (what Desktop's "Update Codex" runs) replaces the `~/.local/bin/codex` link that Desktop over
+   * SSH runs first: doctor flags it, `ccodex setup` takes the link back and keeps the installed codex as stock.
+   */
+  async officialInstaller() {
+    const remote = join(HOME, ".local", "bin", "codex");
+    const desktopSsh = { ...process.env, PATH: `${dirname(remote)}:${process.env.PATH}` };
+    const script = execFileSync("curl", ["-fsSL", "https://chatgpt.com/codex/install.sh"], { encoding: "utf8", timeout: 60_000 });
+    execFileSync("sh", ["-c", script], { encoding: "utf8", timeout: 300_000, env: { ...process.env, CODEX_NON_INTERACTIVE: "1" } });
+    const installed = execFileSync("readlink", [remote], { encoding: "utf8" }).trim();
+    check(installed.includes("/.codex/packages/standalone/"), "the installer took ~/.local/bin/codex", installed);
+    const flagged = JSON.parse(spawnSync("ccodex", ["doctor", "--json"], { encoding: "utf8" }).stdout).checks.find((entry) => entry.id === "install");
+    check(!flagged.ok && flagged.detail.includes("ccodex setup"), "doctor flags the takeover", flagged);
+    const setup = execFileSync("ccodex", ["setup"], { encoding: "utf8", timeout: 120_000 }).trim();
+    check(execFileSync("readlink", [remote], { encoding: "utf8" }).trim() === join(HOME, ".ccodex", "bin", "codex"), "setup took the link back", setup);
+    check(execFileSync("readlink", [join(HOME, ".ccodex", "backups", "remote-codex")], { encoding: "utf8" }).trim() === installed, "the installed codex kept aside");
+    // Like Desktop over SSH: ~/.local/bin first. The gateway runs on the installer's codex.
+    client.close();
+    await daemon("restart", desktopSsh);
+    client = await Client.connect();
+    const doctor = JSON.parse(spawnSync("ccodex", ["doctor", "--json"], { encoding: "utf8", env: desktopSsh }).stdout);
+    const codex = doctor.checks.find((entry) => entry.id === "codex").detail;
+    check(doctor.checks.every((entry) => entry.ok) && codex.startsWith(join(HOME, ".ccodex", "backups", "remote-codex")), "doctor: stock is the installed codex", doctor.checks);
+    const standalone = execFileSync(installed, ["--version"], { encoding: "utf8" }).trim();
+    const replies = [];
+    for (const [model, word] of [[state.haiku, "CLAUDE-AFTER-INSTALL"], [GPT, "GPT-AFTER-INSTALL"]]) {
+      const { thread } = await client.request("thread/start", { model, cwd: WORK });
+      const reply = await client.turn(thread.id, `Reply with exactly: ${word}`);
+      check(reply.answers.some((answer) => answer.includes(word)), `${model} turn after setup`, reply.answers);
+      replies.push(...reply.answers);
+    }
+    check(codex.includes(standalone.split(" ").at(-1)), "the gateway's codex is the installed version", { codex, standalone });
+    return { installed, standalone, codex, replies };
+  },
+
+  /** Desktop's terminal/git helpers (process/spawn, no thread) run on stock; doctor; uninstall leaves plain codex. */
+  async management() {
+    const before = client.messages.length;
+    await client.request("process/spawn", { command: ["bash", "-lc", "echo TERM-OK"], cwd: WORK, streamStdoutStderr: true, streamStdin: true, timeoutMs: 10_000, processHandle: "process:e2e" });
+    const exited = await client.waitFor("process/exited", (params) => params.processHandle === "process:e2e", 30_000, before);
+    const output = client.messages.slice(before).filter((m) => m.method === "process/outputDelta" && m.params.processHandle === "process:e2e")
+      .map((m) => Buffer.from(m.params.deltaBase64, "base64").toString()).join("");
+    check(output.includes("TERM-OK") && exited.exitCode === 0, "process/spawn through the gateway", { output, exited });
+    const doctor = JSON.parse(spawnSync("ccodex", ["doctor", "--json"], { encoding: "utf8" }).stdout);
+    check(doctor.checks.every((entry) => entry.ok), "doctor", doctor);
+    client.close();
+    const uninstalled = execFileSync("ccodex", ["uninstall"], { encoding: "utf8" }).trim();
+    const codex = execFileSync("sh", ["-c", "command -v codex"], { encoding: "utf8", env: { ...process.env, PATH: process.env.PATH.replace(`${HOME}/.ccodex/bin:`, "") } }).trim();
+    check(!existsSync(join(HOME, ".ccodex", "bin")) && !existsSync(SOCKET), "uninstalled", { uninstalled, codex });
+    const stock = execFileSync(codex, ["exec", "--skip-git-repo-check", "-m", GPT, "Reply with exactly: PLAIN-OK"], { cwd: WORK, encoding: "utf8", timeout: 180_000 });
+    check(stock.includes("PLAIN-OK"), "plain codex after uninstall", stock);
+    return { output: output.trim(), doctor: doctor.checks.map((entry) => `${entry.id}: ${entry.detail}`), uninstalled, codex };
+  },
+};
+
+/** Scenarios that install, migrate or uninstall: a second attempt would not start from the same state. */
+const NO_RETRY = new Set(["migration", "officialInstaller", "management", "upgradeFrom04"]);
+
+/** What each chat last said: tells a model that did not do as asked from a bug. */
+const lastAnswers = (messages) => Object.fromEntries(messages
+  .filter((m) => m.method === "item/completed" && m.params.item.type === "agentMessage")
+  .map((m) => [m.params.threadId, m.params.item.text.slice(0, 400)]));
+
+/** Everything needed to tell why a scenario failed: Claude's transcripts and registry, the gateway's state and logs, the protocol. */
+function keepArtifacts(name, attempt) {
+  const dir = `/out/failed/${name}-${attempt}`;
+  spawnSync("sh", ["-c", `mkdir -p ${dir} && cp -r ${HOME}/.claude/projects ${HOME}/.claude/sessions ${HOME}/.ccodex/state ${HOME}/.codex/app-server-daemon ${dir}/ 2>/dev/null; ps -eo pid,ppid,rss,etime,args > ${dir}/ps.txt`]);
+  writeFileSync(join(dir, "messages.json"), JSON.stringify(client.messages));
+  return dir;
+}
+
+const wanted = process.argv.slice(2);
+spawnSync("rm", ["-rf", "/out/failed"]);
+const started = await daemon("start");
+console.log("daemon:", started.slice(0, 300));
+client = await Client.connect();
+// A failed scenario runs once more (real models sometimes decline a test's odd request); a pass on retry shows as 🔁
+// with the first attempt's failure, so a flaky bug stays visible.
+for (const [name, run] of Object.entries(scenarios)) {
+  if (wanted.length && !wanted.includes(name)) continue;
+  const failures = [];
+  for (let attempt = 1; ; attempt += 1) {
+    const at = Date.now();
+    const [before, since] = [client, client.messages.length];
+    try {
+      const detail = await run();
+      const seconds = Math.round((Date.now() - at) / 1000);
+      results.push({ name, ok: true, seconds, detail, failures });
+      console.log(`${failures.length ? "🔁" : "✅"} ${name} (${seconds}s)`, failures.length ? `passed on retry after: ${JSON.stringify(failures[0]).slice(0, 1500)}` : "", JSON.stringify(detail).slice(0, 600));
+      break;
+    } catch (error) {
+      const failure = { error: error.message, detail: error.detail ?? error.stack, modelSaid: lastAnswers(client === before ? client.messages.slice(since) : client.messages), artifacts: keepArtifacts(name, attempt) };
+      failures.push(failure);
+      if (attempt < 2 && !NO_RETRY.has(name)) continue;
+      results.push({ name, ok: false, seconds: Math.round((Date.now() - at) / 1000), ...failure, failures });
+      console.log(`❌ ${name}: ${error.message}`, JSON.stringify(failures).slice(0, 3000));
+      break;
+    }
+  }
+}
+writeFileSync("/out/results.json", JSON.stringify(results, null, 2));
+writeFileSync("/out/messages.json", JSON.stringify(client.messages));
+for (const file of ["rpc.jsonl", "meta.json"]) {
+  const path = join(HOME, ".ccodex", "state", file);
+  if (existsSync(path)) copyFileSync(path, join("/out", file));
+}
+const daemonState = join(HOME, ".codex", "app-server-daemon");
+if (existsSync(daemonState)) for (const file of readdirSync(daemonState)) if (file.endsWith(".log")) copyFileSync(join(daemonState, file), join("/out", file));
+console.log(`${results.filter((r) => r.ok).length}/${results.length} passed (${results.filter((r) => r.ok && r.failures.length).length} on retry)`);
+process.exit(0);

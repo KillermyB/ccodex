@@ -1,4 +1,6 @@
 import { parse, stringify } from "smol-toml";
+import { updateFromGitHub } from "./updates.js";
+import { activateNativeExtensions } from "../claude/extensions.js";
 import { verifyNetwork } from "../security/network.js";
 import { assertAuthenticated } from "../security/authentication.js";
 import { verifyBundle } from "../security/bundle.js";
@@ -225,14 +227,15 @@ export async function setup(args: readonly string[]): Promise<number> {
     if (name !== version && name !== previous?.activeVersion) rmSync(join(paths.versions, name), { recursive: true, force: true });
   }
   for (const stale of ["staging", "previous"]) rmSync(join(paths.home, stale), { recursive: true, force: true });
-  // Do not modify Claude's existing settings, agents, retention or MCP configuration.
+  if (loadConfig().accessMode === "personal") activateNativeExtensions(loadConfig(), readFileSync(join(installedRoot, "agents", "codex-wrapper.md"), "utf8"));
   // Read from the activated version: 0.4 hands over to this setup from ~/.ccodex/staging, removed above.
   process.stdout.write(`CCodex ${version} activated. Quit and reopen Codex before starting a test conversation.\n`);
   return 0;
 }
 
 export async function update(args: readonly string[]): Promise<number> {
-  throw new Error("Registry updates are disabled. Review and install a new local secure bundle.");
+  process.stdout.write(await updateFromGitHub(loadConfig(), packageVersion(), args.includes("--check")) + "\n");
+  return 0;
 }
 
 export async function uninstall(args: readonly string[]): Promise<number> {
@@ -297,7 +300,7 @@ export async function doctor(config: Config, json: boolean): Promise<number> {
       if (!status.loggedIn) throw new Error("not logged in → run: ccodex auth claude");
       return `${status.email ?? "logged in"} (${status.authMethod ?? "unknown"})`;
     }),
-    check("security", () => "local secure fork; native relay and remote control disabled"),
+    check("security", () => "local personal fork; authenticated remote control supported"),
     check("gateway", async () => {
       await probeAppServer(config.publicSocket);
       return `listening on ${config.publicSocket}`;
@@ -318,6 +321,12 @@ export async function doctor(config: Config, json: boolean): Promise<number> {
 
 export async function runManagementCommand(args: readonly string[], config: () => Config): Promise<number | undefined> {
   switch (args[0]) {
+    case "extensions": {
+      const c = config();
+      activateNativeExtensions(c, readFileSync(new URL("../../agents/codex-wrapper.md", import.meta.url), "utf8"));
+      process.stdout.write("Extensions, agents et délégation Codex configurés dans l’espace Claude dédié.\n");
+      return 0;
+    }
     case "access": {
       const mode = args[1];
       if (mode !== "project" && mode !== "personal") throw new Error("Usage: ccodex access personal|project");

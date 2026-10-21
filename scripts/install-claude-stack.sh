@@ -1,3 +1,4 @@
 #!/bin/sh
 set -eu
-printf '%s\n' 'CCodex Secure does not install delegation agents or MCP servers.'
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec node "$ROOT/dist/cli/main.js" extensions

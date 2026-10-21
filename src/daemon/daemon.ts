@@ -314,7 +314,7 @@ class HybridDaemon {
     return {
       status: "bootstrapped",
       backend: "pid",
-      autoUpdateEnabled: false,
+      autoUpdateEnabled: this.config.autoUpdate === true,
       remoteControlEnabled,
       managedCodexPath: this.paths.wrapperPath,
       managedCodexVersion: version,
@@ -325,7 +325,6 @@ class HybridDaemon {
   }
 
   private async setRemoteControl(enabled: boolean): Promise<JsonOutput> {
-    if (enabled) throw new Error("Remote control is disabled in CCodex Secure.");
     const previous = loadSettings(this.paths.settingsFile);
     const managed = reconcileManagedProcess(this.paths.pidFile);
     const managedOwnsSocket = managed ? this.ownsSocket(managed) : false;

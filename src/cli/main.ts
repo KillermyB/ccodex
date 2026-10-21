@@ -9,6 +9,7 @@ import { publishGatewayOwner } from "../daemon/ownership.js";
 import { runDaemonCommand } from "../daemon/daemon.js";
 import { loadDaemonSettings } from "../daemon/settings.js";
 import { runManagementCommand } from "../management/commands.js";
+import { scheduleAutoUpdate } from "../management/updates.js";
 
 async function main(): Promise<number> {
   // Desktop may start us with a minimal PATH: keep `npm i -g` binaries (codex, `env node` shebangs) reachable.
@@ -35,13 +36,15 @@ async function main(): Promise<number> {
     return delegate(config.codex, withProxySocket(invocation.proxyArgs, invocation.socketPath));
   }
   if (invocation.kind === "stdioFrontend") {
+    scheduleAutoUpdate(config);
     const { runStdioFrontend } = await import("../desktop/stdioFrontend.js");
     return runStdioFrontend(config, invocation.socketPath, { configOverrides: invocation.configOverrides });
   }
 
   const { startGateway } = await import("../gateway/server.js");
   const logger = new Logger(config.logLevel);
-  const remoteControl = false;
+  const remoteControl = process.env.CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED !== "1"
+    && (invocation.stockArgs.includes("--remote-control") || loadDaemonSettings().remoteControlEnabled);
   const stockArgs = invocation.stockArgs.filter((arg) => arg !== "--remote-control");
   let stop!: () => void;
   const stopped = new Promise<void>((resolve) => { stop = resolve; });

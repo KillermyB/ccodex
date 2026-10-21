@@ -63,7 +63,7 @@ export function toolDecision(name: string, input: Record<string, unknown>, cwd: 
   if (name === "Bash") return "deny";
   const read = ["Read", "Glob", "Grep"].includes(name);
   const write = ["Edit", "Write", "NotebookEdit"].includes(name);
-  if (!read && !write) return "deny";
+  if (!read && !write) return mode === "personal" && !readOnly ? "pass" : "deny";
   if (write && readOnly) return "deny";
   const path = input.file_path ?? input.notebook_path ?? input.path ?? cwd;
   if (typeof path !== "string" || !permittedPath(path, cwd, mode)) return "deny";
@@ -74,14 +74,21 @@ export function secureEnvironment(config: Config): Record<string, string> {
   const temporary = join(config.dataDir, "tmp");
   mkdirSync(temporary, { recursive: true, mode: 0o700 });
   mkdirSync(config.claudeHome, { recursive: true, mode: 0o700 });
+  if (config.accessMode === "personal") {
+    const env = { ...process.env, HOME: homedir(), CLAUDE_CONFIG_DIR: config.claudeHome,
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: config.claudeHome, CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
+      CLAUDE_CODE_ENTRYPOINT: "claude-desktop" } as Record<string, string>;
+    delete env.CCODEX_SHIM_ACTIVE; delete env.CODEX_CLI_PATH;
+    return env;
+  }
   return {
-    HOME: homedir(), PATH: config.accessMode === "personal" ? process.env.PATH ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" : "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    HOME: homedir(), PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     LANG: "en_US.UTF-8", TERM: "dumb", TMPDIR: temporary, CLAUDE_CODE_TMPDIR: temporary,
     CLAUDE_CONFIG_DIR: config.claudeHome, CLAUDE_SECURESTORAGE_CONFIG_DIR: config.claudeHome,
     CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
     DISABLE_TELEMETRY: "1", DISABLE_ERROR_REPORTING: "1", DISABLE_AUTOUPDATER: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-    CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1", ...(config.accessMode === "personal" ? {} : { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" }), CLAUDE_CODE_DISABLE_CRON: "1",
+    CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1", CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1", CLAUDE_CODE_DISABLE_CRON: "1",
     CLAUDE_CODE_ENTRYPOINT: "sdk-ts", CLAUDE_AGENT_SDK_VERSION: "0.3.296", CLAUDE_CODE_SDK_READS_SESSION_STATE: "1",
   };
 }
@@ -119,15 +126,15 @@ export function secureOptions(config: Config, cwd?: string, readOnly = true): Op
   const protectedPaths = root ? [".git", ".claude", ".env", ".env.local", ".env.production"].map((p) => join(root, p)) : [];
   return {
     ...(config.accessMode === "personal" ? { additionalDirectories: [homedir(), ...["/Volumes", "/Users/Shared"].filter(existsSync)] } : {}),
-    settingSources: [], strictMcpConfig: true, mcpServers: {}, plugins: [], skills: [],
-    settings: { syncClaudeAiSkills: false, syncClaudeAiPlugins: false },
+    settingSources: config.accessMode === "personal" ? ["user", "project", "local"] : [], strictMcpConfig: config.accessMode !== "personal", mcpServers: {},
+    ...(config.accessMode === "personal" ? {} : { plugins: [], skills: [] }),
+    ...(config.accessMode === "personal" ? {} : { settings: { syncClaudeAiSkills: false, syncClaudeAiPlugins: false } }),
     env: secureEnvironment(config),
     allowDangerouslySkipPermissions: false,
-    // The native Bash tool is disabled. Our host-side shell tool has its own non-networked Seatbelt process.
+    // The isolated project mode uses a separate shell runner with its own non-networked Seatbelt process.
     sandbox: { enabled: false },
     spawnClaudeCodeProcess: (options) => {
       if (config.accessMode === "personal") {
-        verifyEngine(config);
         return spawn(options.command, options.args, { cwd: options.cwd, env: { ...secureEnvironment(config), HOME: options.env.HOME ?? homedir() }, signal: options.signal, stdio: ["pipe", "pipe", "pipe"] });
       }
       if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) throw new Error("CCodex Secure requires macOS Seatbelt; refusing an unsandboxed launch.");

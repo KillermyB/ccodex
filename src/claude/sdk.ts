@@ -8,10 +8,11 @@ import type { SessionSettings } from "./session.js";
 import { modelCatalogValue, normalizeClaudeModelIdentifier } from "./modelSelection.js";
 import { claudeSkillFile } from "./toolMapper.js";
 import { secureOptions } from "../security/policy.js";
+import { nativeExtensions } from "./extensions.js";
 import { ULTRA } from "./delegation.js";
 
 export function baseOptions(config: Config, cwd?: string, readOnly = true): Options {
-  return { pathToClaudeCodeExecutable: config.claudeBinary, ...secureOptions(config, cwd, readOnly) };
+  return { pathToClaudeCodeExecutable: config.claudeBinary, ...secureOptions(config, cwd, readOnly), ...nativeExtensions(config) };
 }
 
 // ---- permissions: modes map directly, no sandbox emulation ----
@@ -29,11 +30,19 @@ function chosenPermissionMode(params: JsonObject, current: PermissionMode, perso
   if (sandbox != null && !["readOnly", "read-only", ":read-only", "workspaceWrite", "workspace-write", ":workspace", ":workspace-write", "dangerFullAccess", "danger-full-access", ":danger-full-access"].includes(sandbox)) {
     throw new Error("Unsupported permission profile: refusing to widen its scope.");
   }
+  if (personal) {
+    const full = ["dangerFullAccess", "danger-full-access", ":danger-full-access"].includes(sandbox);
+    if (params.approvalsReviewer && params.approvalsReviewer !== "user") return "auto";
+    if (params.approvalPolicy === "never") return full ? "bypassPermissions" : "dontAsk";
+    if (params.approvalPolicy != null) return "default";
+    if (full) return "bypassPermissions";
+    if (sandbox != null && current === "bypassPermissions") return "default";
+    if (params.approvalsReviewer === "user" && current === "auto") return "default";
+    return undefined;
+  }
   if (["dangerFullAccess", "danger-full-access", ":danger-full-access"].includes(sandbox)) {
-    if (personal) return "bypassPermissions";
     throw new Error("CCodex Secure refuses Full Access. Choose the workspace permission profile.");
   }
-  if (personal && sandbox == null && params.approvalPolicy == null && params.approvalsReviewer == null) return current;
   // Auto-review and imported permissive modes never grant authority in this fork.
   if (params.approvalPolicy === "never") return "dontAsk";
   return "default";
@@ -62,6 +71,7 @@ export function codexPermissions(mode: string | null, cwd: string, personal = fa
     type: "workspaceWrite", writableRoots: personal ? [...new Set([cwd, homedir()])] : [cwd], networkAccess: personal, excludeTmpdirEnvVar: false, excludeSlashTmp: false,
   };
   const profile = { id: ":workspace", extends: null };
+  if (personal && mode === "auto") return { approvalPolicy: "on-request", approvalsReviewer: "auto_review", sandboxPolicy, activePermissionProfile: profile };
   if (mode === "dontAsk") return { approvalPolicy: "never", approvalsReviewer: "user", sandboxPolicy, activePermissionProfile: profile };
 
   return { approvalPolicy: "on-request", approvalsReviewer: "user", sandboxPolicy, activePermissionProfile: profile };

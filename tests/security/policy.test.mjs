@@ -53,12 +53,12 @@ test('no inherited credentials, proxies, custom endpoints or executable hooks',(
  assert.equal(options.sandbox.enabled,false);assert.equal(typeof options.spawnClaudeCodeProcess,'function');
  for(const name of ['ANTHROPIC_API_KEY','AWS_SECRET_ACCESS_KEY','HTTPS_PROXY','NODE_OPTIONS'])delete process.env[name];
 });
-test('titles and authentication state are separated by default',()=>{
- assert.doesNotMatch(defaultConfigToml(),/rename_prompt\s*=/);assert.equal(claudeHome(),join(productHome(),'claude'));
+test('personal defaults enable native features and keep dedicated authentication state',()=>{
+ assert.match(defaultConfigToml(),/access_mode = "personal"/);assert.match(defaultConfigToml(),/auto_update = true/);assert.equal(claudeHome(),join(productHome(),'claude'));
 });
-test('remote control and automatic GPT delegation fail closed',async()=>{
- const remote=new RemoteControl('',new Logger('error'),true);await remote.start();
- await assert.rejects(()=>remote.enable(false),/disabled/);await assert.rejects(()=>runMcpServer(config,'test'),/disabled/);
+test('remote pairing requires an enabled relay',async()=>{
+ const remote=new RemoteControl('',new Logger('error'),false);await remote.start();
+ await assert.rejects(()=>remote.pairing('remoteControl/pairing/start',{}),/requires remote control/);await remote.stop();
 });
 test('a foreign connection cannot resolve another chats approval request',async()=>{
  const gateway=new Gateway({...config,rpcCapture:false},join(base,'sock'),new Logger('error'));

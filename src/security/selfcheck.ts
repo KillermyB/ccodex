@@ -20,7 +20,7 @@ export async function selfCheck(config: Config): Promise<string> {
     const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
     const code = await new Promise<number | null>((done, fail) => { child.once("exit", done); child.once("error", fail); }).finally(() => clearTimeout(timer));
     if (code !== 0) throw new Error("The Claude engine could not start inside macOS Seatbelt.");
-    if (!/^2\.1\.304\b/u.test(version)) throw new Error(`This build was validated with Claude Code 2.1.304; found ${version.trim()}. Validate this engine version before activation.`);
+    if (!(config.accessMode === "personal" ? /^\d+\.\d+\.\d+\b/u : /^2\.1\.304\b/u).test(version)) throw new Error(`This build was validated with Claude Code 2.1.304; found ${version.trim()}. Validate this engine version before activation.`);
     const good = await runSandboxedShell(cwd, "echo verified > check.txt");
     const blocked = await runSandboxedShell(cwd, "echo forbidden > ../must-not-exist.txt");
     if (good.failed || !blocked.failed) throw new Error("The macOS file boundary did not pass its self-check.");

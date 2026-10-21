@@ -75,7 +75,7 @@ export class Gateway {
     this.catalog = new Catalog(this);
     this.lineages = new Lineages(this);
     this.titles = new Titles(this);
-    this.remote = new RemoteControl(this.socketPath, this.logger, false);
+    this.remote = new RemoteControl(this.socketPath, this.logger, remoteControl);
     this.statusSkill = statusSkill(this.config.dataDir);
     // The socket opens before the first scan: a client connects at once and its requests wait for it.
     this.ready = this.claude.start().catch((error: unknown) => this.logger.error("claude.start.failed", { error: String(error) }));
@@ -199,7 +199,7 @@ export class Gateway {
       return (conn, p) => statusCommand(this, conn, method, p);
     }
     if (method === "turn/start") {
-      if (params.turnTrigger === "thread_title" && (this.claude.owns(threadId) || this.config.renamePrompt)) {
+      if (params.turnTrigger === "thread_title" && ((this.config.accessMode !== "personal" && this.claude.owns(threadId)) || this.config.renamePrompt)) {
         return (conn, p) => this.titles.answerDesktopTitleTurn(conn, p);
       }
       this.titles.onTurnStart(threadId, params);

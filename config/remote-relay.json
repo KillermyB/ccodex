@@ -1,0 +1,10 @@
+{
+  "package": "@gkorepanov/ccodex-relay-darwin-arm64",
+  "version": "0.5.11",
+  "upstream_repository": "https://github.com/gkorepanov/ccodex",
+  "source_commit": "1fe776936b19bc80d6fea1220ffc8a71e443faf4",
+  "codex_transport_commit": "29d1e7f316229cd65c7e4a70476050c14962cf10",
+  "archive_integrity": "sha512-ltU88/7ziiiY7ZnPeQ+JjMlFlexOo08u1jQK24Rb2foz4ZH/74i+m8qFu3+dU0/SiEi4FkcApMQzfDhYaHDAJg==",
+  "binary_sha256": "682087d7252e05295b3ba029ba2f48d5fbf27a0db34c538b7e2653ab56b063e8",
+  "note": "Upstream prebuilt binary; integrity checked, not independently reproduced. Rust sources and lockfile restored for inspection; historical dependency advisories remain applicable."
+}

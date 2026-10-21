@@ -88,6 +88,7 @@ function cursorSegment(cursor: string): number | undefined {
  */
 export class Lineages {
   /** Model of the other provider chosen through `thread/settings/update`; the switch runs on the next turn. */
+  private readonly pending = new Map<string, JsonObject>();
   private readonly resumed = new WeakMap<Connection, Set<string>>();
   /** Stock backends being created by switches, their held announcements, and the backends (both providers) created so far. */
   private creatingBackends = 0;
@@ -110,6 +111,7 @@ export class Lineages {
 
   public switchRequested(method: string, params: JsonObject): boolean {
     if (method !== "turn/start" && method !== "thread/settings/update") return false;
+    if (this.pending.has(params.threadId)) return true;
     const target = this.providerOf(requestedModel(params));
     return target !== undefined && target !== this.segments(params.threadId).at(-1)!.provider;
   }
@@ -179,9 +181,19 @@ export class Lineages {
     if (method === "thread/settings/update" || method === "turn/start") {
       const target = this.providerOf(requestedModel(params));
       if (target && target !== current.provider) {
-        throw new Error("CCodex Secure blocks provider transfers. Start a new chat for the other provider.");
+        if (this.gateway.config.accessMode !== "personal") throw new Error("CCodex Secure blocks provider transfers. Start a new chat for the other provider.");
+        if (method === "thread/settings/update") {
+          this.pending.set(publicId, params);
+          return {};
+        }
+        this.pending.delete(publicId);
+        return this.switchProvider(connection, publicId, segments, params);
       }
-
+      const pending = this.pending.get(publicId);
+      this.pending.delete(publicId);
+      if (!target && pending && method === "turn/start") {
+        return this.switchProvider(connection, publicId, segments, { ...pending, ...params, model: requestedModel(pending) });
+      }
     }
     if (segments.length === 1) return this.forward(connection, current, method, params);
     if (HISTORY_METHODS.has(method)) return this.history(connection, publicId, segments, method, params);

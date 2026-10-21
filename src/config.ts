@@ -5,6 +5,7 @@ import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { parse } from "smol-toml";
 
 export interface Config {
+  readonly autoUpdate?: boolean;
   /** Personal mode uses normal native Claude file and shell access. Omitted means project isolation. */
   readonly accessMode?: "project" | "personal";
   /** The codex installed on the machine (PATH, skipping our shims), or `codex_binary`. */
@@ -39,10 +40,12 @@ Keep the complete title, including emoji, within 36 characters.
 Return only the title.`;
 
 export function defaultConfigToml(): string {
-  return `# CCodex Secure: no GPT titles, RPC captures, project plugins or remote relay.
-log_level = "warn"
-rpc_capture = false
-claude_visualize = false
+  return `# CCodex personal mode: native features, remote UI and fork updates.
+access_mode = "personal"
+auto_update = true
+log_level = "info"
+rpc_capture = true
+claude_visualize = true
 `;
 }
 
@@ -131,9 +134,11 @@ export function loadConfig(): Config {
   const configuredCodex = process.env.CCODEX_CODEX ?? file.codex_binary as string | undefined;
   const codex = configuredCodex ? resolve(expandHome(configuredCodex)) : findInstalledCodex(home);
   if (!codex) throw new Error("No `codex` found on PATH. Install it with `npm i -g @openai/codex` or set codex_binary in ~/.ccodex/config.toml.");
-  const renamePrompt = undefined;
+  const personal = file.access_mode === "personal";
+  const renamePrompt = typeof file.rename_prompt === "string" ? file.rename_prompt.trim() || undefined : personal ? DEFAULT_RENAME_PROMPT : undefined;
   return {
     codex,
+    autoUpdate: file.auto_update ?? personal,
     accessMode: file.access_mode === "personal" ? "personal" : "project",
     claudeBinary: resolve(expandHome(process.env.CCODEX_CLAUDE_BINARY ?? file.claude_binary ?? bundledClaudeExecutable())),
     claudeHome: claudeHome(),
@@ -143,13 +148,13 @@ export function loadConfig(): Config {
       ?? join(codexHome(), "app-server-control", "app-server-control.sock")),
     modelPrefix: file.model_prefix ?? "claude:",
     logLevel: process.env.CCODEX_LOG_LEVEL as Config["logLevel"] ?? file.log_level ?? "info",
-    rpcCapture: false,
+    rpcCapture: process.env.CCODEX_RPC_CAPTURE ? process.env.CCODEX_RPC_CAPTURE === "1" : file.rpc_capture ?? personal,
     rpcCaptureMaxBytes: file.rpc_capture_max_bytes ?? 1_073_741_824,
     rpcLimitBytes: (file.rpc_limit_mb ?? 10) * 1_000_000,
     ...(renamePrompt ? { renamePrompt } : {}),
     ...(file.title_model ? { titleModel: file.title_model as string } : {}),
     delegateCodex: expandHome(process.env.CCODEX_DELEGATE_CODEX ?? file.delegate_codex ?? codex),
     improveModelsFormatting: file.improve_models_formatting_for_codex_app ?? true,
-    claudeVisualize: false,
+    claudeVisualize: file.claude_visualize ?? personal,
   };
 }

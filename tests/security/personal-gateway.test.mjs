@@ -13,7 +13,7 @@ const {Logger}=await import('../../dist/log.js');
 
 test('personal gateway exposes native tools, cross-project access and inline artifacts while honoring chat permissions',async()=>{
  const root=mkdtempSync(join('/private/tmp','ccsgw-'));const project=join(root,'project');mkdirSync(project);
- process.env.CLAUDE_CONFIG_DIR=join(root,'claude');process.env.CODEX_HOME=join(root,'codex');
+ process.env.HOME=root;process.env.CLAUDE_CONFIG_DIR=join(root,'claude');process.env.CODEX_HOME=join(root,'codex');
  const config={accessMode:'personal',codex:resolve('tests/fixtures/fakeStock.mjs'),delegateCodex:resolve('tests/fixtures/fakeStock.mjs'),claudeBinary:'/bin/echo',claudeHome:process.env.CLAUDE_CONFIG_DIR,productHome:root,dataDir:join(root,'state'),publicSocket:join(root,'gw.sock'),modelPrefix:'claude:',logLevel:'error',rpcCapture:false,rpcCaptureMaxBytes:1000,rpcLimitBytes:1e7,improveModelsFormatting:true,claudeVisualize:false};
  fakeClaude.reset();const server=await startGateway(config,config.publicSocket,['app-server'],new Logger('error'),false);
  const ws=new WebSocket('ws://test/rpc',{createConnection:()=>createConnection(config.publicSocket)});await new Promise((ok,bad)=>{ws.once('open',ok);ws.once('error',bad)});
@@ -28,19 +28,18 @@ test('personal gateway exposes native tools, cross-project access and inline art
   const started=await request('thread/start',{model:'claude:claude-opus-5-5',cwd:project,sandbox:'workspace-write'});assert.equal(started.sandbox.type,'workspaceWrite');assert.equal(started.sandbox.networkAccess,true);
   const threadId=started.thread.id;await request('turn/start',{threadId,input:[{type:'text',text:'synthetic prompt',text_elements:[]}]});
   await until(()=>messages.some(m=>m.method==='turn/completed'&&m.params.threadId===threadId));
-  const options=fakeClaude.options.findLast(o=>(o.sessionId===threadId||o.resume===threadId));assert.ok(options);assert.ok(options.tools.includes('Bash'));assert.ok(!options.disallowedTools.includes('Bash'));assert.equal(options.allowDangerouslySkipPermissions,false);assert.deepEqual(Object.keys(options.mcpServers),['artifacts']);
-  const guard=options.hooks.PreToolUse[0].hooks[0];const result=await guard({tool_name:'Write',tool_input:{file_path:join(project,'file.txt')}});assert.equal(result.hookSpecificOutput.permissionDecision,'ask');const bash=await guard({tool_name:'Bash',tool_input:{command:'git status'}});assert.equal(bash.hookSpecificOutput.permissionDecision,'ask');const read=await guard({tool_name:'Read',tool_input:{file_path:join(root,'sibling.txt')}});assert.deepEqual(read,{});const artifact=await guard({tool_name:'mcp__artifacts__publish_html',tool_input:{html:'<div>demo</div>',title:'Demo'}});assert.deepEqual(artifact,{});
-  const count=fakeClaude.prompts.length;await request('turn/start',{threadId,turnTrigger:'thread_title',input:[{type:'text',text:'private title text',text_elements:[]}]});assert.equal(fakeClaude.prompts.length,count);
-  await assert.rejects(()=>request('thread/settings/update',{threadId,model:'gpt-6-luna'}),/blocks provider transfers/);
-  await assert.rejects(()=>request('remoteControl/enable'),/disabled/);
+  const options=fakeClaude.options.findLast(o=>(o.sessionId===threadId||o.resume===threadId));assert.ok(options);assert.equal(options.tools,undefined);assert.deepEqual(options.settingSources,['user','project','local']);assert.ok(!options.disallowedTools.includes('Bash'));assert.equal(options.allowDangerouslySkipPermissions,true);assert.equal(options.permissionMode,'default');assert.deepEqual(Object.keys(options.mcpServers).sort(),['artifacts','codex']);assert.ok(!options.disallowedTools.includes('Agent'));assert.ok(!options.disallowedTools.includes('Skill'));
+  const guard=options.hooks.PreToolUse[0].hooks[0];const result=await guard({tool_name:'Write',tool_input:{file_path:join(project,'file.txt')}});assert.deepEqual(result,{});const bash=await guard({tool_name:'Bash',tool_input:{command:'git status'}});assert.deepEqual(bash,{});const read=await guard({tool_name:'Read',tool_input:{file_path:join(root,'sibling.txt')}});assert.deepEqual(read,{});const artifact=await guard({tool_name:'mcp__artifacts__publish_html',tool_input:{html:'<div>demo</div>',title:'Demo'}});assert.deepEqual(artifact,{});
+  await assert.rejects(()=>request('remoteControl/pairing/start'),/requires remote control/);
   await request('thread/settings/update',{threadId,sandbox:'danger-full-access'});
   await request('turn/start',{threadId,input:[{type:'text',text:'synthetic full access check',text_elements:[]}]});
-  await until(()=>fakeClaude.options.some(o=>(o.sessionId===threadId||o.resume===threadId)&&o.allowDangerouslySkipPermissions===true));
+  await until(()=>fakeClaude.options.some(o=>(o.sessionId===threadId||o.resume===threadId)&&o.permissionMode==='bypassPermissions'));
   const full=fakeClaude.options.findLast(o=>(o.sessionId===threadId||o.resume===threadId));assert.equal(full.permissionMode,'bypassPermissions');
-  await until(()=>messages.filter(m=>m.method==='turn/completed'&&m.params.threadId===threadId).length>=3);
+  await until(()=>messages.filter(m=>m.method==='turn/completed'&&m.params.threadId===threadId).length>=2);
   await request('thread/settings/update',{threadId,sandbox:'read-only'});
   await request('turn/start',{threadId,input:[{type:'text',text:'synthetic read only check',text_elements:[]}]});
-  await until(()=>fakeClaude.options.findLast(o=>(o.sessionId===threadId||o.resume===threadId))?.allowDangerouslySkipPermissions===false);
+  await until(()=>fakeClaude.options.findLast(o=>(o.sessionId===threadId||o.resume===threadId))?.permissionMode==='default');
   const readonly=fakeClaude.options.findLast(o=>(o.sessionId===threadId||o.resume===threadId));const deny=await readonly.hooks.PreToolUse[0].hooks[0]({tool_name:'Bash',tool_input:{command:'touch new-file'}});assert.equal(deny.hookSpecificOutput.permissionDecision,'deny');
+  assert.deepEqual(await request('thread/settings/update',{threadId,model:'gpt-6-luna'}),{});
  }finally{ws.close();await server.stop();rmSync(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});}
 });
