@@ -174,26 +174,71 @@ export class Lineages {
 
   // ---- routing ----
 
+  /** Confirm the picker selection without transferring history until the next user turn. */
+  private async selectProvider(connection: Connection, publicId: string, source: Segment, params: JsonObject): Promise<unknown> {
+    const previous = this.pending.get(publicId);
+    this.pending.set(publicId, params);
+    try {
+      const settings = source.provider === "claude"
+        ? this.gateway.claude.threadSettings(this.gateway.claude.settings(source.threadId))
+        : stockSettings(await connection.upstream.request("thread/resume", {
+          threadId: source.threadId, excludeTurns: true, developerInstructions: connection.developerInstructions,
+        }));
+      const model = requestedModel(params);
+      const modelProvider = this.providerOf(model) === "claude" ? "claude"
+        : (await connection.upstream.request("config/read", { includeLayers: false })).config.model_provider ?? "openai";
+      // A later selection or turn may have overtaken the asynchronous settings read.
+      if (this.pending.get(publicId) !== params) return {};
+      const effort = params.effort ?? params.collaborationMode?.settings?.reasoning_effort ?? settings.effort;
+      const selected = {
+        ...settings, model, modelProvider, effort,
+        ...(params.serviceTier !== undefined ? { serviceTier: params.serviceTier } : {}),
+        collaborationMode: {
+          ...settings.collaborationMode, mode: params.collaborationMode?.mode ?? settings.collaborationMode?.mode ?? "default",
+          settings: { ...settings.collaborationMode?.settings, model, reasoning_effort: effort },
+        },
+      };
+      for (const viewer of this.viewers(source, connection)) viewer.notify("thread/settings/updated", { threadId: publicId, threadSettings: selected });
+      return {};
+    } catch (error) {
+      if (this.pending.get(publicId) === params) {
+        if (previous) this.pending.set(publicId, previous);
+        else this.pending.delete(publicId);
+      }
+      throw error;
+    }
+  }
+
   public async handle(connection: Connection, method: string, params: JsonObject): Promise<unknown> {
     const publicId: string = params.threadId;
     const segments = this.segments(publicId);
     const current = segments.at(-1)!;
     if (method === "thread/settings/update" || method === "turn/start") {
+      const pending = this.pending.get(publicId);
+      if (pending && requestedModel(params) == null && method === "thread/settings/update") {
+        return this.selectProvider(connection, publicId, current, { ...pending, ...params, model: requestedModel(pending) });
+      }
+      if (pending && method === "turn/start" && params.model == null) {
+        // Desktop can send its previous collaboration model after a picker change.
+        // The acknowledged selection wins; an explicit top-level per-turn model
+        // or a new settings update can still change/cancel it.
+        const model = requestedModel(pending);
+        params = { ...pending, ...params, model, effort: pending.effort ?? params.effort,
+          ...(params.collaborationMode ? { collaborationMode: {
+            ...params.collaborationMode, settings: { ...params.collaborationMode.settings, model },
+          } } : {}),
+        };
+      }
       const target = this.providerOf(requestedModel(params));
       if (target && target !== current.provider) {
         if (this.gateway.config.accessMode !== "personal") throw new Error("CCodex Secure blocks provider transfers. Start a new chat for the other provider.");
         if (method === "thread/settings/update") {
-          this.pending.set(publicId, params);
-          return {};
+          return this.selectProvider(connection, publicId, current, params);
         }
         this.pending.delete(publicId);
         return this.switchProvider(connection, publicId, segments, params);
       }
-      const pending = this.pending.get(publicId);
       this.pending.delete(publicId);
-      if (!target && pending && method === "turn/start") {
-        return this.switchProvider(connection, publicId, segments, { ...pending, ...params, model: requestedModel(pending) });
-      }
     }
     if (segments.length === 1) return this.forward(connection, current, method, params);
     if (HISTORY_METHODS.has(method)) return this.history(connection, publicId, segments, method, params);
@@ -588,13 +633,13 @@ export class Lineages {
     const stock: JsonObject = await connection.upstream.request("thread/resume", {
       threadId: source.threadId, excludeTurns: true, developerInstructions: connection.developerInstructions,
     });
-    const permissions = permissionSettings({ approvalPolicy: stock.approvalPolicy, approvalsReviewer: stock.approvalsReviewer, sandboxPolicy: stock.sandbox }, { permissionMode: "default", plan: false });
+    const permissions = permissionSettings({ approvalPolicy: stock.approvalPolicy, approvalsReviewer: stock.approvalsReviewer, sandboxPolicy: stock.sandbox }, { permissionMode: "default", plan: false }, this.gateway.config.accessMode === "personal");
     const found: JsonObject = await connection.upstream.request("thread/goal/get", { threadId: source.threadId });
     const goal = found.goal?.status === "complete" ? null : found.goal;
     // The goal goes on with the chat's next backend: stock pursues it no more (a paused one it doesn't; clearing it
     // would blink the goal away for every client until the switch ends).
     if (goal?.status === "active") await connection.upstream.request("thread/goal/clear", { threadId: source.threadId });
-    const session = this.gateway.claude.create(this.gateway.claude.settingsFrom(params, { cwd: stock.cwd, model: null, effort: null, fast: false, ...permissions }));
+    const session = this.gateway.claude.create(this.gateway.claude.settingsFrom(params, { cwd: stock.cwd, readOnly: stock.sandbox?.type === "readOnly", model: null, effort: null, fast: false, ...permissions }));
     // A backend from its first record on: its transcript is on disk before the lineage lists it.
     this.newBackends.add(session.threadId);
     for (const viewer of viewers) this.gateway.subscribe(session.threadId, viewer);
@@ -604,9 +649,9 @@ export class Lineages {
     tell("turn/started", { threadId: publicId, turn });
     tell("item/started", { item, threadId: publicId, turnId, startedAtMs: Date.now() });
     try {
-      const summary = await this.gptSummary(source.threadId);
       const last: JsonObject = await this.gateway.stock.request("thread/turns/list", { threadId: source.threadId, limit: 1, sortDirection: "desc" });
-      await session.inject(`${SUMMARY_PREFIX}\n${summary}`);
+      // An empty draft has no history to transfer and needs no GPT summary call.
+      if (last.data.length) await session.inject(`${SUMMARY_PREFIX}\n${await this.gptSummary(source.threadId)}`);
       this.gateway.meta.setLineage(publicId, [
         ...segments.slice(0, -1), { ...source, lastTurnId: last.data[0]?.id ?? null },
         { provider: "claude", threadId: session.threadId, lastTurnId: null },
@@ -644,7 +689,7 @@ export class Lineages {
     publicId: string, segments: Segment[], source: Segment, summary: string, params: JsonObject, goal: JsonObject | null,
   ): Promise<unknown> {
     const settings = this.gateway.claude.settings(source.threadId);
-    const permissions = codexPermissions(settings.permissionMode, settings.cwd);
+    const permissions = codexPermissions(settings.permissionMode, settings.cwd, this.gateway.config.accessMode === "personal");
     const started = await this.startBackend(connection, {
       model: requestedModel(params), cwd: settings.cwd, developerInstructions: connection.developerInstructions,
       approvalPolicy: params.approvalPolicy ?? permissions.approvalPolicy,

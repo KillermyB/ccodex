@@ -1,4 +1,6 @@
-CCodex Personnel 0.7.0-personal.2
+CCodex Personnel 0.7.0-personal.3
+Routage GPT/Claude : confirme le choix du sélecteur, conserve ce choix face à un ancien modèle de collaboration renvoyé par Desktop et respecte son annulation explicite. Un brouillon sans historique ne déclenche plus de résumé GPT. Le modèle de la réponse Claude est vérifié dans un échange réel de test.
+
 Connexion dédiée : conserve la recherche du compte dans le trousseau utilisée lors de la connexion initiale, même si USER est hérité. Aucun identifiant copié ni modifié.
 Base : gkorepanov/ccodex 479aa13d66c9b54685348d0f7b9bdc1c7445a7bf
 

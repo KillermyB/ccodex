@@ -1,6 +1,6 @@
 {
   "name": "@gkorepanov/ccodex",
-  "version": "0.7.0-personal.2",
+  "version": "0.7.0-personal.3",
   "description": "Unofficial macOS fork of ccodex with personal/project modes, native Claude tools and inline animation previews.",
   "homepage": "https://github.com/KillermyB/ccodex#readme",
   "repository": {

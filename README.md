@@ -2,7 +2,7 @@
 
 Run **Claude Code inside the OpenAI Codex desktop interface** on **macOS Apple Silicon**, with native tools, MCP servers, skills, plugins, remote pairing and interactive HTML previews.
 
-**Version: `0.7.0-personal.2` · Experimental.**
+**Version: `0.7.0-personal.3` · Experimental.**
 
 Fork of [gkorepanov/ccodex](https://github.com/gkorepanov/ccodex), created by George Korepanov, based on [`479aa13`](https://github.com/gkorepanov/ccodex/commit/479aa13d66c9b54685348d0f7b9bdc1c7445a7bf). The [MIT license](LICENSE) is preserved. Independent project, not affiliated with OpenAI or Anthropic.
 
