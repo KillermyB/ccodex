@@ -19,6 +19,7 @@ const launchctl={run(args){
 }};
 try{
  process.env.HOME=root;process.env.CCODEX_HOME=join(root,"private-'$()-state");process.env.CODEX_HOME=join(root,'codex');
+ mkdirSync(process.env.CODEX_HOME,{recursive:true});process.env.CODEX_SQLITE_HOME=process.env.CODEX_HOME;
  process.env.PATH='/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
  delete process.env.CLAUDE_CONFIG_DIR;delete process.env.CCODEX_CLAUDE_BINARY;
  assert.equal(homedir(),root,'Refusing to test outside the temporary HOME');
