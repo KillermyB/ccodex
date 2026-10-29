@@ -23,6 +23,9 @@ import { installCliPathAgent, uninstallCliPathAgent, type CliPathAgentInstall } 
 import { relayBinary } from "../gateway/remote.js";
 import { atomicSymlink, atomicWrite } from "./files.js";
 import { compareSemver } from "./shimSelect.js";
+import { findDesktopCodex } from "../desktop/nativeRuntime.js";
+import { entryShim } from "../desktop/entryShim.js";
+import { verifyDesktopStartup } from "../desktop/startupCheck.js";
 
 const execute = promisify(execFile);
 const PACKAGE = "@gkorepanov/ccodex";
@@ -64,38 +67,12 @@ function readManifest(): Manifest | undefined {
 const sha256 = (content: string | Buffer) => createHash("sha256").update(content).digest("hex");
 const quote = (value: string) => `'${value.replaceAll("'", "'\"'\"'")}'`;
 
-function shim(name: "codex" | "ccodex", node: string): string {
-  const prelude = `#!/bin/sh
-set -eu
-if [ "\${CCODEX_SHIM_ACTIVE:-}" = 1 ]; then
-  printf '%s\\n' 'CCodex recursion guard: managed shim attempted to invoke itself.' >&2
-  exit 70
-fi
-CCODEX_SHIM_ACTIVE=1
-CCODEX_HOME=\${CCODEX_HOME:-"$HOME/.ccodex-secure"}
-CCODEX_NODE=${quote(node)}
-if [ ! -x "$CCODEX_NODE" ]; then
-  CCODEX_NODE=$(command -v node 2>/dev/null || true)
-fi
-if [ -z "$CCODEX_NODE" ] || [ ! -x "$CCODEX_NODE" ]; then
-  printf '%s\\n' 'CCodex Node runtime is missing. Reinstall Node.js, then rerun the local CCodex Secure installer' >&2
-  exit 69
-fi
-export CCODEX_SHIM_ACTIVE CCODEX_HOME
-`;
-  const current = `exec "$CCODEX_NODE" "$CCODEX_HOME/current/node_modules/${PACKAGE}/dist/cli/main.js" "$@"\n`;
-  if (name === "codex") return `${prelude}${current}`;
-  return `${prelude}${current}`;
-
-}
-
 const fishQuote = (value: string) => "'" + value.replaceAll("\\", "\\\\").replaceAll("'", "\\'") + "'";
 
 function shellBlock(fish: boolean, bin: string): string {
-  const cliPath = process.platform === "darwin"
-    ? fish ? `set -gx CODEX_CLI_PATH ${fishQuote(`${bin}/codex`)}\n` : `export CODEX_CLI_PATH=${quote(`${bin}/codex`)}\n`
-    : "";
-  return `${BEGIN}\n${fish ? `fish_add_path --move --prepend ${fishQuote(bin)}` : `export PATH=${quote(bin)}:"$PATH"`}\n${cliPath}${END}\n`;
+  // The GUI session agent owns the desktop override. Shell files only add the CLI.
+  // In particular, a new terminal must not undo an emergency launchctl unsetenv.
+  return `${BEGIN}\n${fish ? `fish_add_path --move --prepend ${fishQuote(bin)}` : `export PATH=${quote(bin)}:"$PATH"`}\n${END}\n`;
 }
 
 const BLOCK_PATTERN = new RegExp(`${BEGIN}\\n[\\s\\S]*?${END}\\n?`, "u");
@@ -149,8 +126,13 @@ export async function setup(args: readonly string[]): Promise<number> {
   if (args.includes("--version") || args.includes("--repair")) throw new Error("Install this verified local bundle directly; registry setup is disabled.");
   const paths = layout();
   if (existsSync(join(homedir(), ".ccodex", "install.json"))) throw new Error("Uninstall the original CCodex before activating this fork; refusing to overwrite its launch configuration.");
-  if (!findInstalledCodex(paths.home)) throw new Error("Install the official Codex CLI first. This fork never downloads another engine.");
+  if (!findDesktopCodex() && !findInstalledCodex(paths.home)) throw new Error("Install the official Codex desktop app or CLI first. This fork never downloads another engine.");
   await selfCheck({ ...loadConfig(), productHome: paths.home });
+  if (process.platform === "darwin") {
+    const native = findDesktopCodex();
+    if (!native) throw new Error("Install the official Codex desktop app before activating the desktop launcher.");
+    await verifyDesktopStartup(native);
+  }
   const source = fileURLToPath(new URL("../../", import.meta.url));
   verifyBundle(source);
   for (const directory of [paths.home, paths.bin, paths.versions, paths.state, claudeHome()]) mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -178,7 +160,7 @@ export async function setup(args: readonly string[]): Promise<number> {
   atomicSymlink(join("versions", version), paths.current);
   const shimHashes: Record<string, string> = {};
   for (const name of ["codex", "ccodex"] as const) {
-    const content = shim(name, process.execPath);
+    const content = entryShim(process.execPath);
     atomicWrite(join(paths.bin, name), content, 0o755);
     shimHashes[name] = sha256(content);
   }
@@ -321,6 +303,25 @@ export async function doctor(config: Config, json: boolean): Promise<number> {
 
 export async function runManagementCommand(args: readonly string[], config: () => Config): Promise<number | undefined> {
   switch (args[0]) {
+    case "desktop": {
+      const manifest = readManifest();
+      if (!manifest) throw new Error("CCodex is not activated.");
+      if (args[1] === "disable") {
+        if (manifest.desktopCliPath && !uninstallCliPathAgent(manifest.desktopCliPath)) throw new Error("The desktop LaunchAgent was modified; it was not removed.");
+        process.stdout.write("Lancement natif rétabli pour la prochaine ouverture de Codex. Connexion Claude et conversations conservées.\n");
+        return 0;
+      }
+      if (args[1] === "enable") {
+        const native = findDesktopCodex();
+        if (!native) throw new Error("Official Codex desktop runtime not found.");
+        await verifyDesktopStartup(native);
+        const desktopCliPath = installCliPathAgent(join(layout().bin, "codex"), manifest.desktopCliPath);
+        atomicWrite(layout().manifest, JSON.stringify({ ...manifest, desktopCliPath }, null, 2) + "\n", 0o600);
+        process.stdout.write("Intégration Claude activée après vérification du démarrage officiel. Quitte et rouvre Codex.\n");
+        return 0;
+      }
+      throw new Error("Usage: ccodex desktop enable|disable");
+    }
     case "extensions": {
       const c = config();
       activateNativeExtensions(c, readFileSync(new URL("../../agents/codex-wrapper.md", import.meta.url), "utf8"));

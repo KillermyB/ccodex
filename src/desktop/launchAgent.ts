@@ -115,7 +115,9 @@ export function installCliPathAgent(
   if (before !== undefined && before !== content && fileHash(path) !== previous?.contentHash) {
     throw new Error(`Refusing to overwrite modified or unmanaged LaunchAgent ${path}`);
   }
-  const previousValue = previous?.previousValue ?? getCodexCliPathEnv(runtime);
+  const currentValue = getCodexCliPathEnv(runtime);
+  // An upgrade must not turn our own override into the value restored on removal.
+  const previousValue = previous ? previous.previousValue : currentValue === entryShimPath ? undefined : currentValue;
   const wasLoaded = launchAgentLoaded(runtime);
   const record = {
     path,

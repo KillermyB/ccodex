@@ -2,7 +2,7 @@
 
 Run **Claude Code inside the OpenAI Codex desktop interface** on **macOS Apple Silicon**, with native tools, MCP servers, skills, plugins, remote pairing and interactive HTML previews.
 
-**Version: `0.7.0-personal.3` · Experimental.**
+**Version: `0.7.1-personal.1` · Experimental.**
 
 Fork of [gkorepanov/ccodex](https://github.com/gkorepanov/ccodex), created by George Korepanov, based on [`479aa13`](https://github.com/gkorepanov/ccodex/commit/479aa13d66c9b54685348d0f7b9bdc1c7445a7bf). The [MIT license](LICENSE) is preserved. Independent project, not affiliated with OpenAI or Anthropic.
 
@@ -50,9 +50,17 @@ Example: “Show an inline transition demo with play/pause and a speed control.�
 
 Settings live in `~/.ccodex-secure/config.toml`. [Example configuration](examples/config.toml).
 
+## Desktop startup and recovery
+
+The gateway uses the engine bundled with the installed Codex desktop app by default, so an app update also updates the underlying engine. For an app installed elsewhere, set `CCODEX_DESKTOP_APP` to its `.app` directory. An explicit `codex_binary` still overrides the gateway engine; plain CLI commands retain their separately installed CLI when available.
+
+The desktop startup configuration check runs directly through the official bundled engine, before Node, the SDK, Claude, the gateway or the updater. Its JSON response and error status are preserved, including organization requirements. Unknown app-server launch options and unsupported transports are handed to native Codex instead of being silently discarded.
+
+**Recovery:** open **CCodex Personnel → Rétablir le démarrage natif**, then quit and reopen Codex. The dedicated Claude login and conversations remain available. **Activer Claude dans Codex** enables the integration again after validating the official startup check. Shell startup files only add the CLI path; they no longer export `CODEX_CLI_PATH` and undo an emergency session-level reset.
+
 ## Installation
 
-Requires an Apple Silicon Mac, Node.js `>=22.13 <27`, the official Codex desktop app and CLI, and a separately installed official Claude Code binary. SDK: `0.3.296`; locally validated engine: `2.1.304`.
+Requires an Apple Silicon Mac, Node.js `>=22.13 <27`, the official Codex desktop app (a separate CLI is optional), and a separately installed official Claude Code binary. SDK: `0.3.296`; locally validated engine: `2.1.304`.
 
 1. Download the macOS package from [this fork’s releases](https://github.com/KillermyB/ccodex/releases).
 2. Quit Codex, open **CCodex Personnel**, then choose **Installer**.
@@ -63,7 +71,7 @@ The app is locally signed, without Apple notarization. Installation preserves th
 
 ## Validation and limitations
 
-**37 dedicated tests passed locally:** permissions, cross-project files, Git, local server, extensions, MCP delegation, pairing lifecycle with a mock relay, crash recovery and update archive validation. [Tests](tests/security) · [macOS CI](.github/workflows/ci.yml).
+**47 dedicated tests passed locally:** permissions, cross-project files, Git, local server, extensions, MCP delegation, pairing lifecycle with a mock relay, crash recovery and update archive validation. [Tests](tests/security) · [macOS CI](.github/workflows/ci.yml).
 
 ```sh
 npm ci --ignore-scripts --omit=optional
@@ -76,7 +84,7 @@ node scripts/prepare-remote-relay.mjs /path/to/ccodex-relay-darwin-arm64-0.5.11.
 
 The preparation step verifies the archive and binary; it does not download or execute them. Activation requires a complete runtime with its `BUNDLE-SHA256.json` manifest.
 
-- Real phone pairing and the display of a Claude-generated preview still need confirmation in actual use. Tests do not send a model message through a user account.
+- Real phone pairing and the display of a Claude-generated preview still need confirmation in actual use. Automated tests use synthetic engines. Separate bounded local checks verify the official desktop startup response and native Claude routing; authenticated checks are not run in CI and remain subject to account limits.
 - The relay is the upstream precompiled binary, checksum-verified but not independently rebuilt. Security advisories for dependencies in its Rust lockfile still apply; those dependencies are not patched in this version.
 - Visual screen/mouse control is not integrated. Finder, Spotlight and AppleScript depend on macOS permissions.
 - Historical Linux build scripts, `0.4 → 0.5` migration scripts and release preparation sources are restored. They do not run automatically on user data. Publication to the original author’s npm account is not enabled; this fork distributes through its GitHub releases.

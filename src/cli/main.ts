@@ -10,17 +10,23 @@ import { runDaemonCommand } from "../daemon/daemon.js";
 import { loadDaemonSettings } from "../daemon/settings.js";
 import { runManagementCommand } from "../management/commands.js";
 import { scheduleAutoUpdate } from "../management/updates.js";
+import { findDesktopCodex, isStartupConfigRequest } from "../desktop/nativeRuntime.js";
 
 async function main(): Promise<number> {
   // Desktop may start us with a minimal PATH: keep `npm i -g` binaries (codex, `env node` shebangs) reachable.
   process.env.PATH = `${process.env.PATH ?? ""}${delimiter}${dirname(process.execPath)}`;
   const args = process.argv.slice(2);
+  // No Claude authentication, gateway startup, updater or config rewriting in a policy check.
+  if (isStartupConfigRequest(args)) {
+    const native = findDesktopCodex();
+    if (native) return delegate(native, args);
+  }
   const management = await runManagementCommand(args, loadConfig);
   if (management !== undefined) return management;
   const config = loadConfig();
   const invocation = classifyInvocation(args, config);
 
-  if (invocation.kind === "delegate") return delegate(config.delegateCodex, args);
+  if (invocation.kind === "delegate") return delegate(args.includes("app-server") ? config.codex : config.delegateCodex, args);
   if (invocation.kind === "mcpServer") {
     const { runMcpServer } = await import("../mcp/server.js");
     const { packageVersion } = await import("../management/commands.js");

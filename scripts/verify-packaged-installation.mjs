@@ -28,12 +28,17 @@ try{
   installCliPathAgent:(shim,previous)=>agent.installCliPathAgent(shim,previous,launchctl),
   uninstallCliPathAgent:record=>agent.uninstallCliPathAgent(record,launchctl),
  }});
- const {setup,uninstall}=await import(pathToFileURL(join(runtime,'dist/management/commands.js')).href);
+ const {setup,uninstall,runManagementCommand}=await import(pathToFileURL(join(runtime,'dist/management/commands.js')).href);
  mkdirSync(join(root,'.local','bin'),{recursive:true});symlinkSync('/bin/echo',join(root,'.local','bin','codex'));
  const zsh=join(root,'.zshrc');writeFileSync(zsh,'# original synthetic settings\n');
  await setup([]);
  assert.equal(value,join(process.env.CCODEX_HOME,'bin','codex'));
  assert.ok(existsSync(join(process.env.CCODEX_HOME,'install.json')));
+ assert.doesNotMatch(readFileSync(zsh,'utf8'),/export CODEX_CLI_PATH=/);
+ await runManagementCommand(['desktop','disable'],()=>({}));
+ assert.equal(value,'synthetic-previous-cli');
+ await runManagementCommand(['desktop','enable'],()=>({}));
+ assert.equal(value,join(process.env.CCODEX_HOME,'bin','codex'));
  appendFileSync(zsh,'# user edit after installation\n');
  await uninstall([]);
  assert.equal(value,'synthetic-previous-cli');assert.equal(readlinkSync(join(root,'.local','bin','codex')),'/bin/echo');

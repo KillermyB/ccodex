@@ -3,12 +3,13 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { parse } from "smol-toml";
+import { findDesktopCodex } from "./desktop/nativeRuntime.js";
 
 export interface Config {
   readonly autoUpdate?: boolean;
   /** Personal mode uses normal native Claude file and shell access. Omitted means project isolation. */
   readonly accessMode?: "project" | "personal";
-  /** The codex installed on the machine (PATH, skipping our shims), or `codex_binary`. */
+  /** Desktop's own engine, falling back to PATH; an explicit `codex_binary` overrides it. */
   readonly codex: string;
   readonly claudeBinary: string;
   readonly claudeHome: string;
@@ -132,7 +133,7 @@ export function loadConfig(): Config {
   const configPath = expandHome(process.env.CCODEX_CONFIG ?? join(home, "config.toml"));
   const file = existsSync(configPath) ? parse(readFileSync(configPath, "utf8")) as Record<string, any> : {};
   const configuredCodex = process.env.CCODEX_CODEX ?? file.codex_binary as string | undefined;
-  const codex = configuredCodex ? resolve(expandHome(configuredCodex)) : findInstalledCodex(home);
+  const codex = configuredCodex ? resolve(expandHome(configuredCodex)) : findDesktopCodex() ?? findInstalledCodex(home);
   if (!codex) throw new Error("No `codex` found on PATH. Install it with `npm i -g @openai/codex` or set codex_binary in ~/.ccodex/config.toml.");
   const personal = file.access_mode === "personal";
   const renamePrompt = typeof file.rename_prompt === "string" ? file.rename_prompt.trim() || undefined : personal ? DEFAULT_RENAME_PROMPT : undefined;
@@ -153,7 +154,7 @@ export function loadConfig(): Config {
     rpcLimitBytes: (file.rpc_limit_mb ?? 10) * 1_000_000,
     ...(renamePrompt ? { renamePrompt } : {}),
     ...(file.title_model ? { titleModel: file.title_model as string } : {}),
-    delegateCodex: expandHome(process.env.CCODEX_DELEGATE_CODEX ?? file.delegate_codex ?? codex),
+    delegateCodex: expandHome(process.env.CCODEX_DELEGATE_CODEX ?? file.delegate_codex ?? findInstalledCodex(home) ?? codex),
     improveModelsFormatting: file.improve_models_formatting_for_codex_app ?? true,
     claudeVisualize: file.claude_visualize ?? personal,
   };

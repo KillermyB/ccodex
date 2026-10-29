@@ -1,4 +1,6 @@
-CCodex Personnel 0.7.0-personal.3
+CCodex Personnel 0.7.1-personal.1
+Démarrage corrigé : contrôle officiel transmis avant Node/Claude, moteur intégré choisi par défaut, options futures transmises au moteur natif, contrôle réel avant activation, retour au lancement natif depuis le panneau et suppression des exports CODEX_CLI_PATH dans les fichiers de shell gérés. Les exigences d’organisation et les erreurs natives sont conservées.
+
 Routage GPT/Claude : confirme le choix du sélecteur, conserve ce choix face à un ancien modèle de collaboration renvoyé par Desktop et respecte son annulation explicite. Un brouillon sans historique ne déclenche plus de résumé GPT. Le modèle de la réponse Claude est vérifié dans un échange réel de test.
 
 Connexion dédiée : conserve la recherche du compte dans le trousseau utilisée lors de la connexion initiale, même si USER est hérité. Aucun identifiant copié ni modifié.

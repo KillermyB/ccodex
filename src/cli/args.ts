@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import type { Config } from "../config.js";
+import { isStartupConfigRequest } from "../desktop/nativeRuntime.js";
 
 const delegatedAppServerCommands = new Set([
   "generate-ts",
@@ -104,7 +105,20 @@ function socketPathFromListen(listen: string | undefined, config: Config): strin
   return value.startsWith("/") ? value : resolve(value);
 }
 
+/** Unknown launch options belong to native Codex, never to a lossy proxy. */
+function supportedLaunchOptions(args: readonly string[]): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (["-c", "--config", "--listen"].includes(arg)) {
+      if (args[++index] === undefined) return false;
+    } else if (!["--stdio", "--analytics-default-enabled", "--remote-control"].includes(arg)
+      && !arg.startsWith("--config=") && !arg.startsWith("--listen=") && !(arg.startsWith("-c") && arg.length > 2)) return false;
+  }
+  return true;
+}
+
 export function classifyInvocation(args: readonly string[], config: Config): Invocation {
+  if (isStartupConfigRequest(args)) return { kind: "delegate" };
   if (args[0] === "mcp-server") return { kind: "mcpServer" };
   const appServerIndex = args.indexOf("app-server");
   if (appServerIndex < 0) return { kind: "delegate" };
@@ -129,6 +143,8 @@ export function classifyInvocation(args: readonly string[], config: Config): Inv
   }
 
   const listen = optionValue(appArgs, "--listen");
+  if (!supportedLaunchOptions(prefix) || !supportedLaunchOptions(appArgs)
+    || (listen && listen !== "stdio://" && !listen.startsWith("unix://"))) return { kind: "delegate" };
   // Stock's default listener, spelled out by some clients (Desktop's Browser Use helper).
   if (!listen || listen === "stdio://" || appArgs.includes("--stdio")) {
     return {
